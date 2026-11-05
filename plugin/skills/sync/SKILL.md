@@ -1,5 +1,5 @@
 ---
-name: secret-sync
+name: sync
 description: Sync a project's gitignored secret files (.env, .env.local, .secrets/, certificates, keys, service-account JSON) between the user's machines through an age-encrypted folder such as Google Drive, and set up new machines for it. Use when the user wants secrets or env files on another computer, a fresh clone is missing its .env or secrets, a new sensitive file appears in a project, or the user asks to push, pull, back up or check project secrets.
 ---
 

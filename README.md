@@ -24,7 +24,7 @@ This repository is also a Claude Code plugin marketplace. Install the plugin:
 
 Then just ask, in any project: *"set up secret-sync on this machine"*, *"pull this project's
 secrets"*, *"is anything here not synced?"*. The skill
-([`plugin/skills/secret-sync/SKILL.md`](plugin/skills/secret-sync/SKILL.md)):
+([`plugin/skills/sync/SKILL.md`](plugin/skills/sync/SKILL.md)):
 
 - installs the binary with a checksum-verified bootstrap, or shows you the command if you
   reserve installs for yourself;

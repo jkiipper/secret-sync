@@ -59,9 +59,9 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          SECRET_SYNC_SOURCE_DIR=rel SECRET_SYNC_INSTALL_DIR="$RUNNER_TEMP/bin" sh plugin/skills/secret-sync/scripts/bootstrap.sh
+          SECRET_SYNC_SOURCE_DIR=rel SECRET_SYNC_INSTALL_DIR="$RUNNER_TEMP/bin" sh plugin/skills/sync/scripts/bootstrap.sh
           "$RUNNER_TEMP/bin/secret-sync" version | grep -q v0.0.0-ci
-          if SECRET_SYNC_SOURCE_DIR=bad SECRET_SYNC_INSTALL_DIR="$RUNNER_TEMP/bad" sh plugin/skills/secret-sync/scripts/bootstrap.sh; then
+          if SECRET_SYNC_SOURCE_DIR=bad SECRET_SYNC_INSTALL_DIR="$RUNNER_TEMP/bad" sh plugin/skills/sync/scripts/bootstrap.sh; then
             echo "tampered checksum was accepted"; exit 1
           fi
           test ! -e "$RUNNER_TEMP/bad/secret-sync"
@@ -69,10 +69,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          ./plugin/skills/secret-sync/scripts/bootstrap.ps1 -SourceDir rel -InstallDir "$env:RUNNER_TEMP\bin" -NoPath
+          ./plugin/skills/sync/scripts/bootstrap.ps1 -SourceDir rel -InstallDir "$env:RUNNER_TEMP\bin" -NoPath
           if (-not ((& "$env:RUNNER_TEMP\bin\secret-sync.exe" version) -match 'v0.0.0-ci')) { throw 'wrong version' }
           $failed = $false
-          try { ./plugin/skills/secret-sync/scripts/bootstrap.ps1 -SourceDir bad -InstallDir "$env:RUNNER_TEMP\bad" -NoPath } catch { $failed = $true }
+          try { ./plugin/skills/sync/scripts/bootstrap.ps1 -SourceDir bad -InstallDir "$env:RUNNER_TEMP\bad" -NoPath } catch { $failed = $true }
           if (-not $failed) { throw 'tampered checksum was accepted' }
           if (Test-Path "$env:RUNNER_TEMP\bad\secret-sync.exe") { throw 'binary installed despite mismatch' }
 
