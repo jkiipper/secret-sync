@@ -37,7 +37,7 @@ import (
 const usage = `secret-sync: sync gitignored secret files between machines via an age-encrypted folder.
 
 Usage:
-  secret-sync doctor  [-json] [-store-root DIR] [-identity FILE]   check this machine, show fixes
+  secret-sync doctor  [-json] [-store-root DIR] [-identity FILE] [-offline-confirmed]   check this machine, show fixes
   secret-sync keygen  [-identity FILE] [-store-root DIR] [-force]  create a new age key (first machine only)
   secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE [-state-dir DIR] [-new-store]
   secret-sync status  [PROJECT | PROJECT/PATH ...] [-discover] [-show-tracked]
@@ -60,6 +60,8 @@ Flags:
   -force          overwrite on conflict, after you decided which side wins;
                   keygen: create a key even though a store already exists
   -new-store      init: create a brand-new store (only on your very first machine)
+  -offline-confirmed  doctor: record that you made the store available offline in your sync
+                  app (doctor cannot detect it); asked again if the store path changes
 
 Statuses:
   new, local-changed, missing-in-store        -> push
@@ -77,13 +79,16 @@ type config struct {
 	IdentityFile string   `json:"identityFile"`
 	StateDir     string   `json:"stateDir"`
 	Exclude      []string `json:"exclude"` // project folders skipped by "status -discover"
+	// The user confirmed that this store path is available offline (doctor -offline-confirmed).
+	OfflineConfirmedFor string `json:"offlineConfirmedFor,omitempty"`
+	OfflineConfirmedAt  string `json:"offlineConfirmedAt,omitempty"`
 }
 
 type options struct {
 	command, config                                      string
 	targets                                              []string
 	discover, showTracked, force, dryRun, help, json     bool
-	newStore                                             bool
+	newStore, offlineConfirmed                           bool
 	machine, projectsRoot, storeRoot, identity, stateDir string
 }
 
@@ -185,6 +190,8 @@ func parseArgs(args []string) (*options, error) {
 			o.showTracked = true
 		case "json":
 			o.json = true
+		case "offlineconfirmed":
+			o.offlineConfirmed = true
 		case "newstore":
 			o.newStore = true
 		case "version", "v":
@@ -248,8 +255,13 @@ func cmdInit(o *options) error {
 	}
 	cfg := config{Machine: o.machine, ProjectsRoot: o.projectsRoot, StoreRoot: o.storeRoot,
 		IdentityFile: o.identity, StateDir: o.stateDir, Exclude: []string{}}
-	if old := (config{}); isFile(o.config) && readJSON(o.config, &old) == nil && old.Exclude != nil {
-		cfg.Exclude = old.Exclude // keep the user's discover exclusions when re-running init
+	if old := (config{}); isFile(o.config) && readJSON(o.config, &old) == nil {
+		if old.Exclude != nil {
+			cfg.Exclude = old.Exclude // keep the user's discover exclusions when re-running init
+		}
+		if old.OfflineConfirmedFor == o.storeRoot {
+			cfg.OfflineConfirmedFor, cfg.OfflineConfirmedAt = old.OfflineConfirmedFor, old.OfflineConfirmedAt
+		}
 	}
 	if err := writeJSON(o.config, cfg); err != nil {
 		return err

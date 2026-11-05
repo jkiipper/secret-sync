@@ -1,6 +1,6 @@
 {
   "name": "secret-sync",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Sync each project's gitignored secret files between your machines through an age-encrypted folder (e.g. Google Drive), and set up new machines.",
   "author": {
     "name": "jkiipper"

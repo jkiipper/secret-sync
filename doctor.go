@@ -180,6 +180,23 @@ func cmdDoctor(o *options) int {
 	var cfg config
 	hasConfig := isFile(o.config) && readJSON(o.config, &cfg) == nil && cfg.StoreRoot != ""
 
+	// -offline-confirmed: the user says the store is available offline. Sync apps give no
+	// reliable way to check this, so the answer is recorded for this exact store path.
+	if o.offlineConfirmed {
+		if !hasConfig {
+			fmt.Fprintln(os.Stderr, "ERROR: -offline-confirmed needs a configured machine; run init first")
+			return 1
+		}
+		cfg.OfflineConfirmedFor, cfg.OfflineConfirmedAt = cfg.StoreRoot, time.Now().Format("2006-01-02")
+		if err := writeJSON(o.config, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			return 1
+		}
+		if !o.json {
+			fmt.Printf("Recorded: %s is available offline.\n\n", cfg.StoreRoot)
+		}
+	}
+
 	// 1. git, for the .gitignore safety check.
 	if p, err := exec.LookPath("git"); err == nil {
 		add(check{Name: "git", Status: "ok", Detail: p})
@@ -239,9 +256,14 @@ func cmdDoctor(o *options) int {
 				"wait until the sync app has finished downloading it and run doctor again (do not create a new key). " +
 				"Only if this is your very first machine, create a new store (keygen, then init -new-store)."})
 		}
-		add(check{Name: "offline access", Status: "manual",
-			Detail: "the store must be available offline, or pulls fail without internet",
-			Fix:    "in the sync app, mark " + q(storeRoot) + " as available offline (Google Drive: right-click > Offline access > Available offline)", By: "user"})
+		if hasConfig && cfg.OfflineConfirmedFor == storeRoot {
+			add(check{Name: "offline access", Status: "ok", Detail: "confirmed by you on " + cfg.OfflineConfirmedAt})
+		} else {
+			add(check{Name: "offline access", Status: "manual",
+				Detail: "the store must be available offline, or pulls fail without internet",
+				Fix: "in the sync app, mark " + q(storeRoot) + " as available offline (Google Drive: right-click > Offline access > Available offline), " +
+					"then record it: secret-sync doctor -offline-confirmed", By: "user"})
+		}
 	}
 
 	// 3. age key.

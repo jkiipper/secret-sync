@@ -38,6 +38,7 @@ files, summarize in text and ask about the groups. If the tool is not available,
 | Action | You run it | You ask first |
 |---|---|---|
 | `version`, `doctor`, `status`, any `-dry-run` | yes | |
+| `doctor -offline-confirmed` | | only after the user says the store is available offline |
 | `pull` (normal; never overwrites local changes) | yes, except on a project's first sync (section 3) | |
 | `init` when `doctor` marks it `by: "agent"` (store exists) | yes | |
 | `include` / `exclude` (decides what is synced) | | propose the list, user confirms |
@@ -52,7 +53,7 @@ Run `secret-sync version`. If it is not found, also try the default install loca
 Use the full path for the rest of the session if the shell's PATH is stale (Claude Code keeps
 the PATH it started with; restarting it after an install also fixes this).
 
-**This skill needs secret-sync v0.1.3 or newer** (`dev` builds are fine). An older binary lacks
+**This skill needs secret-sync v0.1.4 or newer** (`dev` builds are fine). An older binary lacks
 safeguards this skill relies on, so treat it exactly like a missing one: do not use it, install
 the current release first. The bootstrap replaces the old binary.
 
@@ -74,7 +75,12 @@ Run `secret-sync doctor -json`. Each check has `status` (`ok`, `warn`, `fail`, `
   restore the age key from their backup (never handle the key file yourself).
 - If the key is missing **and the store already exists**, the user must restore the same key
   as their other machines. Never suggest `keygen` in that case (it refuses anyway).
-- `manual` items (offline access for the store folder): mention them once.
+- `offline access` (`manual`): the tool cannot detect it. Ask (AskUserQuestion) whether the
+  store folder is already available offline in their sync app: **yes** → run
+  `secret-sync doctor -offline-confirmed` (records it; doctor then shows it as ok); **not yet**
+  → show how (Google Drive: right-click the folder > Offline access > Available offline), then
+  ask again; **skip** → leave it. Never inspect the sync app's own files or databases to find
+  out; they hold data about all the user's files.
 
 **No store found** (the `store` check says DECIDE). Do not decide from a guess, and do not rely
 on the user's memory alone: a sync app that was just installed may still be downloading the

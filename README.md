@@ -127,7 +127,9 @@ In short:
 1. **First machine:** `secret-sync keygen` creates the key (`~/.config/secret-sync/age-key.txt`).
    Back it up in your password manager right away.
    **Other machines:** restore that same key file from your backup.
-2. Mark the store folder (default `<Google Drive>/dev-secrets`) as *available offline*.
+2. Mark the store folder (default `<Google Drive>/dev-secrets`) as *available offline*. Sync apps
+   offer no reliable way to detect this, so after `init` tell `doctor` once:
+   `secret-sync doctor -offline-confirmed`. It is remembered for that store path.
 3. `secret-sync init ...` with the values `doctor` suggests. On the very first machine only, add
    `-new-store`: `init` never creates a store implicitly, because a missing store can also mean the
    sync app has not finished downloading it (and a second store would split your machines).

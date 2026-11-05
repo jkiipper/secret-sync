@@ -230,6 +230,14 @@ $r = SSRaw @('doctor', '-config', $freshCfg, '-identity', $freshKey, '-store-roo
 Check 'doctor rejects a key that does not match the store' ($r.Code -eq 2 -and $r.Out -match "not the store's key") $r.Out
 $r = SSRaw @('doctor', '-config', (Join-Path $work 'a-config.json'))
 Check 'configured machine: ready' ($r.Code -eq 0 -and $r.Out -match 'Ready\.') $r.Out
+Check 'offline access is a manual item until confirmed' ($r.Out -match '\[MANUAL\]\s+offline access' -and $r.Out -match 'doctor -offline-confirmed') $r.Out
+$r = SSRaw @('doctor', '-config', (Join-Path $work 'a-config.json'), '-offline-confirmed')
+Check 'doctor -offline-confirmed records it' ($r.Code -eq 0 -and $r.Out -match 'Recorded:' -and $r.Out -match '\[OK\s*\]\s+offline access\s+confirmed by you on \d{4}-\d{2}-\d{2}') $r.Out
+$r = SS 'a' @('init', '-Machine', 'machine-A', '-ProjectsRoot', $aRoot, '-StoreRoot', $StoreRoot, '-IdentityFile', $IdentityFile, '-StateDir', (Join-Path $work 'state-a'))
+$r = SSRaw @('doctor', '-config', (Join-Path $work 'a-config.json'))
+Check '...remembered, also after re-running init on the same store' ($r.Out -match '\[OK\s*\]\s+offline access' -and $r.Out -notmatch '\[MANUAL\]') $r.Out
+$r = SSRaw @('doctor', '-config', $freshCfg, '-offline-confirmed')
+Check '-offline-confirmed needs a configured machine' ($r.Code -eq 1 -and $r.Out -match 'run init first') $r.Out
 $r = SSRaw @('doctor', '-config', (Join-Path $work 'a-config.json'), '-json')
 $j = $null; try { $j = $r.Out | ConvertFrom-Json } catch {}
 Check 'doctor -json is valid JSON with ready=true' ($j -and $j.ready -eq $true -and $j.checks.Count -ge 4) $r.Out
