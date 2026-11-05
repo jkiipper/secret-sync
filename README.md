@@ -104,6 +104,16 @@ In short:
 3. `secret-sync init ...` with the values `doctor` suggests.
 4. `secret-sync pull` in each project.
 
+### Download
+
+Prebuilt binaries for Windows x64, macOS (Apple Silicon and Intel) and Linux x64 are attached
+to each [release](https://github.com/jkiipper/secret-sync/releases), with a `SHA256SUMS` file.
+Verify the download before running it. The binaries are not code-signed: Windows SmartScreen
+may warn, and on macOS run `xattr -d com.apple.quarantine <file>` once.
+
+Releases are built by GitHub Actions from the tagged commit, after the full test suite passes
+(`.github/workflows/release.yml`).
+
 ### Build from source
 
 Requires Go 1.25+.

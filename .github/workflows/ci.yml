@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # reused by release.yml before anything is published
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "Not gofmt-formatted:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: cross-compile every release target
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null .
+            echo "ok $target"
+          done
+
+  e2e-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: build
+        run: go build -o bin\secret-sync.exe .
+      - name: end-to-end test (fake data, throwaway key and store)
+        shell: pwsh
+        run: |
+          $key = Join-Path $env:RUNNER_TEMP 'age-key.txt'
+          .\bin\secret-sync.exe keygen -identity $key
+          $env:SECRET_SYNC_TEST_STORE = Join-Path $env:RUNNER_TEMP 'test-store'
+          ./tests/Test-SecretSync.ps1 -IdentityFile $key

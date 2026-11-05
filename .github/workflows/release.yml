@@ -1,0 +1,60 @@
+name: release
+
+# Push a tag like v0.1.0 to publish a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: build binaries
+        env:
+          CGO_ENABLED: "0"
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for target in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64; do
+            os="${target%/*}"; arch="${target#*/}"
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+            GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/secret-sync-${os}-${arch}${ext}" .
+          done
+          cd dist && sha256sum secret-sync-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          Download the binary for your system and verify it against `SHA256SUMS`:
+
+          | System | File |
+          |---|---|
+          | Windows x64 | `secret-sync-windows-amd64.exe` |
+          | macOS Apple Silicon | `secret-sync-darwin-arm64` |
+          | macOS Intel | `secret-sync-darwin-amd64` |
+          | Linux x64 | `secret-sync-linux-amd64` |
+
+          The binaries are not code-signed: Windows SmartScreen may warn, and on macOS run
+          `xattr -d com.apple.quarantine secret-sync-darwin-*` once.
+          EOF
+          gh release create "$VERSION" dist/* --title "$VERSION" --notes-file notes.md --generate-notes --verify-tag
