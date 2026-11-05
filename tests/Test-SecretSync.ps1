@@ -1,0 +1,147 @@
+<#
+.SYNOPSIS
+  End-to-end test of secret-sync with FAKE data, simulating two machines (A and B)
+  on one PC: separate project roots, state dirs and configs, one shared test store.
+  -Exe:          the binary to test (default bin\secret-sync.exe).
+  -StoreRoot:    a DEDICATED, empty test folder (or set SECRET_SYNC_TEST_STORE). Never your real store:
+                 the test resets it. It is marked with .secret-sync-test-store on first use.
+  -IdentityFile: an age key (default ~/.config/secret-sync/age-key.txt). Only fake data is encrypted.
+#>
+param(
+    [string]$Exe = (Join-Path $PSScriptRoot '..\bin\secret-sync.exe'),
+    [string]$StoreRoot = $env:SECRET_SYNC_TEST_STORE,
+    [string]$IdentityFile = ([IO.Path]::Combine($HOME, '.config', 'secret-sync', 'age-key.txt'))
+)
+$ErrorActionPreference = 'Stop'
+if (-not $StoreRoot) { throw 'Set -StoreRoot or SECRET_SYNC_TEST_STORE to a dedicated, empty test folder.' }
+New-Item -ItemType Directory -Force $StoreRoot | Out-Null
+$marker = Join-Path $StoreRoot '.secret-sync-test-store'
+if (-not (Test-Path $marker)) {
+    if (Get-ChildItem -Force $StoreRoot) { throw "$StoreRoot is not empty and not a test store. Use a dedicated empty folder." }
+    Set-Content $marker 'Test store for tests/Test-SecretSync.ps1. Safe to delete.'
+}
+$ss = (Resolve-Path $Exe).Path
+$work = Join-Path $PSScriptRoot 'work'
+$aRoot = Join-Path $PSScriptRoot 'dummy'
+$bRoot = Join-Path $work 'b-projects'
+$proj = 'demo-project'
+$script:AllOutput = [System.Collections.Generic.List[string]]::new()
+$script:Fails = 0
+
+function SS([string]$machine, [string[]]$a) {
+    $cfg = Join-Path $work "$machine-config.json"
+    $out = if ($ss -like '*.ps1') { & pwsh -NoProfile -File $ss @a -Config $cfg 2>&1 } else { & $ss @a -Config $cfg 2>&1 }
+    $out = @($out | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+    $script:AllOutput.AddRange([string[]]@($out))
+    [pscustomobject]@{ Code = $code; Out = ($out -join "`n") }
+}
+function Check([string]$name, [bool]$ok, [string]$detail = '') {
+    if ($ok) { Write-Host "  PASS  $name" -ForegroundColor Green } else { $script:Fails++; Write-Host "  FAIL  $name $detail" -ForegroundColor Red }
+}
+function Count-Status($r, [string]$status) { ([regex]::Matches($r.Out, "(?m)^\S+\s+\S.*?\s$([regex]::Escape($status))(\s|$)")).Count }
+function Same([string]$rel) {
+    $a = Join-Path $aRoot "$proj\$rel"; $b = Join-Path $bRoot "$proj\$rel"
+    (Test-Path $a) -and (Test-Path $b) -and ((Get-FileHash $a).Hash -eq (Get-FileHash $b).Hash)
+}
+
+# ---------------------------------------------------------------- reset
+Write-Host "== reset"
+if (Test-Path $work) { Remove-Item -Recurse -Force $work }
+if (Test-Path (Join-Path $StoreRoot $proj)) { Remove-Item -Recurse -Force (Join-Path $StoreRoot $proj) }
+foreach ($f in 'ignore.txt') { if (Test-Path (Join-Path $StoreRoot $f)) { Remove-Item -Force (Join-Path $StoreRoot $f) } }
+& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'New-DummyProject.ps1') | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $bRoot $proj) | Out-Null
+Copy-Item (Join-Path $aRoot "$proj\.gitignore") (Join-Path $bRoot "$proj\.gitignore")   # simulates a fresh clone
+git -C (Join-Path $bRoot $proj) init -q 2>$null
+
+$secretFiles = @('.env', 'local.env', '.secrets\resend_api_key', '.secrets\pfx_password', '.secrets\fake_key.pem', '.secrets\fake_cert.pfx')
+# Fake values that must never appear in any output.
+$fakeValues = @(Select-String -Path (Join-Path $aRoot "$proj\.env"), (Join-Path $aRoot "$proj\local.env") -Pattern 'fake_[A-Za-z0-9]{6,}' -AllMatches |
+        ForEach-Object { $_.Matches.Value }) + @(Get-Content -Raw (Join-Path $aRoot "$proj\.secrets\resend_api_key"))
+
+# ---------------------------------------------------------------- init
+Write-Host "== init"
+$r = SS 'a' @('init', '-Machine', 'machine-A', '-ProjectsRoot', $aRoot, '-StoreRoot', $StoreRoot, '-IdentityFile', $IdentityFile, '-StateDir', (Join-Path $work 'state-a'))
+Check 'init A' ($r.Code -eq 0) $r.Out
+$r = SS 'b' @('init', '-Machine', 'machine-B', '-ProjectsRoot', $bRoot, '-StoreRoot', $StoreRoot, '-IdentityFile', $IdentityFile, '-StateDir', (Join-Path $work 'state-b'))
+Check 'init B (same key accepted)' ($r.Code -eq 0) $r.Out
+
+# ---------------------------------------------------------------- first push
+Write-Host "== first push from A"
+$r = SS 'a' @('status', $proj)
+Check 'A status: 6 new files' ((Count-Status $r 'new') -eq 6) $r.Out
+$r = SS 'a' @('push', $proj, '-DryRun')
+Check 'dry-run writes nothing' (-not (Test-Path (Join-Path $StoreRoot $proj))) $r.Out
+$r = SS 'a' @('push', $proj)
+Check 'A push: 6 pushed' (([regex]::Matches($r.Out, 'pushed')).Count -eq 6) $r.Out
+Check 'store holds 6 .age files' (@(Get-ChildItem (Join-Path $StoreRoot $proj) -Recurse -Filter *.age).Count -eq 6)
+$r = SS 'a' @('push', $proj)
+Check 'second push is a no-op (6 in-sync)' ((Count-Status $r 'in-sync') -eq 6 -and $r.Out -notmatch 'pushed') $r.Out
+
+# ---------------------------------------------------------------- pull on B
+Write-Host "== pull on B"
+$r = SS 'b' @('status')
+Check 'B status: 6 remote-new' ((Count-Status $r 'remote-new') -eq 6) $r.Out
+$r = SS 'b' @('pull', $proj)
+Check 'B pull exit 0' ($r.Code -eq 0) $r.Out
+foreach ($f in $secretFiles) { Check "identical after pull: $f" (Same $f) }
+
+# ---------------------------------------------------------------- change on A
+Write-Host "== change on A, propagate to B"
+Add-Content (Join-Path $aRoot "$proj\.env") 'ADDED_LATER=fake_ADDEDLATER123'
+$fakeValues += 'fake_ADDEDLATER123'
+$r = SS 'a' @('status', $proj)
+Check 'A: .env local-changed' ((Count-Status $r 'local-changed') -eq 1) $r.Out
+$r = SS 'a' @('push', $proj); Check 'A push changed .env' ($r.Out -match 'pushed') $r.Out
+$r = SS 'b' @('status', $proj)
+Check 'B: .env remote-changed' ((Count-Status $r 'remote-changed') -eq 1) $r.Out
+$r = SS 'b' @('pull', "$proj\.env"); Check 'B pull single file' ($r.Code -eq 0) $r.Out
+Check 'identical after change: .env' (Same '.env')
+
+# ---------------------------------------------------------------- conflict
+Write-Host "== conflict: both machines edit local.env"
+Add-Content (Join-Path $aRoot "$proj\local.env") 'A_EDIT=fake_AEDIT9876'
+Add-Content (Join-Path $bRoot "$proj\local.env") 'B_EDIT=fake_BEDIT5432'
+$fakeValues += 'fake_AEDIT9876', 'fake_BEDIT5432'
+$r = SS 'a' @('push', $proj); Check 'A pushes first' ($r.Out -match 'pushed') $r.Out
+$r = SS 'b' @('status', $proj)
+Check 'B sees conflict (exit 2)' ((Count-Status $r 'conflict') -eq 1 -and $r.Code -eq 2) $r.Out
+$r = SS 'b' @('push', $proj)
+Check 'B push refuses to overwrite' ($r.Out -match 'SKIPPED' -and $r.Code -eq 2) $r.Out
+$r = SS 'b' @('pull', $proj)
+Check 'B pull refuses to overwrite' ($r.Out -match 'SKIPPED' -and $r.Code -eq 2) $r.Out
+$r = SS 'b' @('pull', "$proj\local.env", '-Force')
+Check 'B forced pull backs up local copy' ($r.Out -match 'backed up') $r.Out
+Check 'backup file exists' (@(Get-ChildItem (Join-Path $work 'state-b\backup') -Recurse -File).Count -eq 1)
+Check 'identical after resolve: local.env' (Same 'local.env')
+
+# ---------------------------------------------------------------- guards
+Write-Host "== guards"
+Set-Content (Join-Path $aRoot "$proj\.env.extra") 'EXTRA=fake_EXTRA55555'
+$fakeValues += 'fake_EXTRA55555'
+$r = SS 'a' @('push', $proj)
+Check 'push refuses a file that is not gitignored' ($r.Out -match 'REFUSED' -and $r.Code -eq 2) $r.Out
+Check '...and did not upload it' (-not (Test-Path (Join-Path $StoreRoot "$proj\.env.extra.age")))
+$r = SS 'a' @('ignore', "$proj\.env.extra"); Check 'ignore command' ($r.Code -eq 0) $r.Out
+$r = SS 'a' @('status', $proj)
+Check 'ignored file hidden from status' ($r.Out -notmatch '\.env\.extra' -and $r.Code -eq 0) $r.Out
+
+# ---------------------------------------------------------------- recovery cases
+Write-Host "== recovery"
+Remove-Item (Join-Path $bRoot "$proj\.secrets\pfx_password")
+$r = SS 'b' @('status', $proj); Check 'missing-locally detected' ((Count-Status $r 'missing-locally') -eq 1) $r.Out
+$r = SS 'b' @('pull', $proj); Check 'pull restores missing file' (Same '.secrets\pfx_password') $r.Out
+Remove-Item (Join-Path $work 'state-b\demo-project.json')
+$r = SS 'b' @('status', $proj); Check 'lost state: identical files show in-sync*' ((Count-Status $r 'in-sync*') -eq 6) $r.Out
+$r = SS 'b' @('pull', $proj); Check 'pull re-links without rewriting' ($r.Out -match 'linked' -and $r.Out -notmatch 'pulled') $r.Out
+
+# ---------------------------------------------------------------- leak check
+Write-Host "== leak check"
+$joined = $script:AllOutput -join "`n"
+$leaks = @($fakeValues | Where-Object { $_ -and $joined.Contains($_.Trim()) })
+Check "no fake value in any output ($($fakeValues.Count) values checked)" ($leaks.Count -eq 0) "leaked: $($leaks.Count)"
+Check 'no PEM content in output' ($joined -notmatch 'BEGIN RSA PRIVATE KEY')
+
+Write-Host ''
+if ($script:Fails) { Write-Host "$script:Fails check(s) FAILED" -ForegroundColor Red; exit 1 } else { Write-Host 'ALL CHECKS PASSED' -ForegroundColor Green }
