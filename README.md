@@ -42,6 +42,8 @@ detects **conflicts** (changed on both).
 ## Commands
 
 ```
+secret-sync doctor  [-json]           check this machine; prints each fix and who should run it
+secret-sync keygen  [-identity FILE]  create a new age key (first machine only)
 secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE
 secret-sync status  [PROJECT | PROJECT/PATH ...] [-discover] [-show-tracked]
 secret-sync include PROJECT/PATTERN ...
@@ -89,10 +91,18 @@ What it does **not** protect against:
 
 ## Setup
 
-1. Generate one age key and use it on every machine (`age-keygen -o ~/.config/secret-sync/age-key.txt`,
-   or any age X25519 key). Back it up in your password manager.
-2. Choose a store folder inside your sync service, and mark it *available offline*.
-3. Build or download `secret-sync`, then run `init` on each machine.
+Run `secret-sync doctor` and follow it. It works before anything is configured: it finds the
+Google Drive folder (Windows, macOS; on Linux use an rclone mount or pass `-store-root`), checks
+git, the key, the store and the config, and prints the exact command for each missing piece.
+
+In short:
+
+1. **First machine:** `secret-sync keygen` creates the key (`~/.config/secret-sync/age-key.txt`).
+   Back it up in your password manager right away.
+   **Other machines:** restore that same key file from your backup.
+2. Mark the store folder (default `<Google Drive>/dev-secrets`) as *available offline*.
+3. `secret-sync init ...` with the values `doctor` suggests.
+4. `secret-sync pull` in each project.
 
 ### Build from source
 

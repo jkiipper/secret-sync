@@ -182,12 +182,39 @@ Remove-Item (Join-Path $work 'state-b\demo-project.json')
 $r = SS 'b' @('status', $proj); Check 'lost state: identical files show in-sync*' ((Count-Status $r 'in-sync*') -eq 7) $r.Out
 $r = SS 'b' @('pull', $proj); Check 'pull re-links without rewriting' ($r.Out -match 'linked' -and $r.Out -notmatch 'pulled') $r.Out
 
+# ---------------------------------------------------------------- doctor / keygen
+Write-Host "== doctor and keygen (fresh machine)"
+$fresh = Join-Path $work 'fresh'
+$freshCfg = Join-Path $fresh 'config.json'; $freshKey = Join-Path $fresh 'age-key.txt'; $freshStore = Join-Path $fresh 'store\dev-secrets'
+function SSRaw([string[]]$a) {
+    $out = @(& $ss @a 2>&1 | ForEach-Object { "$_" }); $code = $LASTEXITCODE
+    $script:AllOutput.AddRange([string[]]$out)
+    [pscustomobject]@{ Code = $code; Out = ($out -join "`n") }
+}
+$r = SSRaw @('doctor', '-config', $freshCfg, '-identity', $freshKey, '-store-root', $freshStore)
+Check 'fresh machine: not ready (exit 2)' ($r.Code -eq 2) $r.Out
+Check 'suggests keygen for a brand-new store' ($r.Out -match 'secret-sync keygen') $r.Out
+Check 'suggests init, to be run by the agent' ($r.Out -match 'fix \(agent\):\s+secret-sync init') $r.Out
+$r = SSRaw @('keygen', '-identity', $freshKey)
+Check 'keygen creates a key and prints the public key' ($r.Code -eq 0 -and (Test-Path $freshKey) -and $r.Out -match 'Public key: age1') $r.Out
+$r = SSRaw @('keygen', '-identity', $freshKey)
+Check 'keygen refuses to overwrite' ($r.Code -eq 1 -and $r.Out -match 'refusing') $r.Out
+$r = SSRaw @('doctor', '-config', $freshCfg, '-identity', $freshKey, '-store-root', $StoreRoot)
+Check 'doctor rejects a key that does not match the store' ($r.Code -eq 2 -and $r.Out -match "not the store's key") $r.Out
+$r = SSRaw @('doctor', '-config', (Join-Path $work 'a-config.json'))
+Check 'configured machine: ready' ($r.Code -eq 0 -and $r.Out -match 'Ready\.') $r.Out
+$r = SSRaw @('doctor', '-config', (Join-Path $work 'a-config.json'), '-json')
+$j = $null; try { $j = $r.Out | ConvertFrom-Json } catch {}
+Check 'doctor -json is valid JSON with ready=true' ($j -and $j.ready -eq $true -and $j.checks.Count -ge 4) $r.Out
+$r = SSRaw @('version'); Check 'version command' ($r.Out -match '^secret-sync ') $r.Out
+
 # ---------------------------------------------------------------- leak check
 Write-Host "== leak check"
 $joined = $script:AllOutput -join "`n"
 $leaks = @($fakeValues | Where-Object { $_ -and $joined.Contains($_.Trim()) })
 Check "no fake value in any output ($($fakeValues.Count) values checked)" ($leaks.Count -eq 0) "leaked: $($leaks.Count)"
 Check 'no PEM content in output' ($joined -notmatch 'BEGIN RSA PRIVATE KEY')
+Check 'no age private key in output' ($joined -notmatch 'AGE-SECRET-KEY-')
 
 Write-Host ''
 if ($script:Fails) { Write-Host "$script:Fails check(s) FAILED" -ForegroundColor Red; exit 1 } else { Write-Host 'ALL CHECKS PASSED' -ForegroundColor Green }

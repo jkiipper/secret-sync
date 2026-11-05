@@ -37,12 +37,15 @@ import (
 const usage = `secret-sync: sync gitignored secret files between machines via an age-encrypted folder.
 
 Usage:
+  secret-sync doctor  [-json] [-store-root DIR] [-identity FILE]   check this machine, show fixes
+  secret-sync keygen  [-identity FILE]                             create a new age key (first machine only)
   secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE [-state-dir DIR]
   secret-sync status  [PROJECT | PROJECT/PATH ...] [-discover] [-show-tracked]
   secret-sync include PROJECT/PATTERN ...          add to the project's manifest (creates it)
   secret-sync exclude PROJECT/PATTERN ...          never sync matching files
   secret-sync push    PROJECT | PROJECT/PATH ...    [-dry-run] [-force]
   secret-sync pull    [PROJECT | PROJECT/PATH ...]  [-dry-run] [-force]
+  secret-sync version
 
 Patterns are relative to the project root, use "/" and may contain * and ?
 (case-insensitive; * also matches across folders). Example:
@@ -52,6 +55,7 @@ Flags:
   -config FILE    config file (default ~/.config/secret-sync/config.json)
   -discover       status: also scan projects that have no manifest yet
   -show-tracked   status: also list candidate files already tracked by git
+  -json           doctor: machine-readable output
   -dry-run        show what would happen, change nothing
   -force          overwrite on conflict, after you decided which side wins
 
@@ -76,7 +80,7 @@ type config struct {
 type options struct {
 	command, config                                      string
 	targets                                              []string
-	discover, showTracked, force, dryRun, help           bool
+	discover, showTracked, force, dryRun, help, json     bool
 	machine, projectsRoot, storeRoot, identity, stateDir string
 }
 
@@ -90,6 +94,16 @@ func run(args []string) int {
 	switch o.command {
 	case "", "help":
 		fmt.Print(usage)
+		return 0
+	case "version":
+		fmt.Println("secret-sync", version)
+		return 0
+	case "doctor":
+		return cmdDoctor(o)
+	case "keygen":
+		if err := cmdKeygen(o); err != nil {
+			return fail(err)
+		}
 		return 0
 	case "init":
 		if err := cmdInit(o); err != nil {
@@ -166,6 +180,10 @@ func parseArgs(args []string) (*options, error) {
 			o.discover = true
 		case "showtracked":
 			o.showTracked = true
+		case "json":
+			o.json = true
+		case "version", "v":
+			pos = append([]string{"version"}, pos...)
 		case "force":
 			o.force = true
 		case "dryrun":
