@@ -20,6 +20,10 @@ if (-not (Test-Path $marker)) {
     if (Get-ChildItem -Force $StoreRoot) { throw "$StoreRoot is not empty and not a test store. Use a dedicated empty folder." }
     Set-Content $marker 'Test store for tests/Test-SecretSync.ps1. Safe to delete.'
 }
+# The store itself lives in a subfolder that every run deletes and recreates, so each run
+# starts from a truly fresh store (exercising init -new-store) whatever earlier runs left.
+$testRoot = $StoreRoot
+$StoreRoot = Join-Path $testRoot 'store'
 $ss = (Resolve-Path $Exe).Path
 $work = Join-Path $PSScriptRoot 'work'
 $aRoot = Join-Path $PSScriptRoot 'dummy'
@@ -48,8 +52,7 @@ function Same([string]$rel) {
 # ---------------------------------------------------------------- reset
 Write-Host "== reset"
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
-if (Test-Path (Join-Path $StoreRoot $proj)) { Remove-Item -Recurse -Force (Join-Path $StoreRoot $proj) }
-foreach ($f in 'ignore.txt') { if (Test-Path (Join-Path $StoreRoot $f)) { Remove-Item -Force (Join-Path $StoreRoot $f) } }
+if (Test-Path $StoreRoot) { Remove-Item -Recurse -Force $StoreRoot }
 & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'New-DummyProject.ps1') | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $bRoot $proj) | Out-Null
 Copy-Item (Join-Path $aRoot "$proj\.gitignore") (Join-Path $bRoot "$proj\.gitignore")   # simulates a fresh clone
