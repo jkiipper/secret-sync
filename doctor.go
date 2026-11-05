@@ -36,6 +36,10 @@ func cmdKeygen(o *options) error {
 	if isFile(p) {
 		return fmt.Errorf("%s already exists; refusing to overwrite a key", p)
 	}
+	if existing := existingStores(o); len(existing) > 0 && !o.force {
+		return fmt.Errorf("a secret-sync store already exists at %s: restore the SAME key your other machines use "+
+			"(from your backup) instead of creating a new one. Use -force only if you really want a second key", strings.Join(existing, ", "))
+	}
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		return err
@@ -52,6 +56,30 @@ func cmdKeygen(o *options) error {
 	fmt.Println("Public key:", pub)
 	fmt.Println("Back this file up now (e.g. in your password manager). Without it the store cannot be decrypted.")
 	return nil
+}
+
+// existingStores lists stores (folders with a recipients.txt) that keygen must not ignore:
+// the -store-root given, or else the configured store and any in detected Drive folders.
+func existingStores(o *options) []string {
+	var candidates []string
+	if o.storeRoot != "" {
+		candidates = []string{o.storeRoot}
+	} else {
+		var cfg config
+		if isFile(o.config) && readJSON(o.config, &cfg) == nil && cfg.StoreRoot != "" {
+			candidates = append(candidates, cfg.StoreRoot)
+		}
+		for _, r := range detectDriveRoots() {
+			candidates = append(candidates, filepath.Join(r, defaultStoreName))
+		}
+	}
+	var out []string
+	for _, c := range candidates {
+		if isFile(filepath.Join(c, "recipients.txt")) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // ---- doctor ----------------------------------------------------------------
@@ -202,10 +230,14 @@ func cmdDoctor(o *options) int {
 				}
 			}
 			add(check{Name: "store", Status: "ok", Detail: fmt.Sprintf("%s (%d project folder(s))", storeRoot, n)})
-		} else if isDir(storeRoot) {
-			add(check{Name: "store", Status: "warn", Detail: storeRoot + " exists but has no recipients.txt; init will set it up"})
 		} else {
-			add(check{Name: "store", Status: "warn", Detail: storeRoot + " does not exist yet: this looks like the first machine; init will create it"})
+			where := storeRoot + " does not exist"
+			if isDir(storeRoot) {
+				where = storeRoot + " exists but has no recipients.txt"
+			}
+			add(check{Name: "store", Status: "warn", Detail: where + ". DECIDE: if you already use secret-sync on another machine, " +
+				"wait until the sync app has finished downloading it and run doctor again (do not create a new key). " +
+				"Only if this is your very first machine, create a new store (keygen, then init -new-store)."})
 		}
 		add(check{Name: "offline access", Status: "manual",
 			Detail: "the store must be available offline, or pulls fail without internet",
@@ -226,8 +258,9 @@ func cmdDoctor(o *options) int {
 			add(check{Name: "age key", Status: "fail", Detail: identity + " missing; the store already exists, so use the SAME key as your other machines",
 				Fix: "restore the key from your backup (e.g. password manager) to " + q(identity), By: "user"})
 		} else {
-			add(check{Name: "age key", Status: "fail", Detail: identity + " missing; no store yet, so a new key is needed",
-				Fix: "secret-sync keygen -identity " + q(identity) + "   then back the file up", By: "user"})
+			add(check{Name: "age key", Status: "fail", Detail: identity + " missing. No store found yet: restore your key from your backup, " +
+				"or, ONLY if this is your very first machine, create one",
+				Fix: "first machine only: secret-sync keygen -identity " + q(identity) + "   then back the file up", By: "user"})
 		}
 	} else if id, err := loadX25519Identity(identity); err != nil {
 		add(check{Name: "age key", Status: "fail", Detail: err.Error(), Fix: "check or restore the key file", By: "user"})
@@ -258,16 +291,19 @@ func cmdDoctor(o *options) int {
 		if projects == "" {
 			projects = guessProjectsRoot()
 		}
-		fix := ""
+		fix, by := "", "agent"
 		if storeRoot != "" {
 			fix = fmt.Sprintf("secret-sync init -machine %s -projects-root %s -store-root %s -identity %s", q(host), q(projects), q(storeRoot), q(identity))
+			if recipients == "" {
+				// Creating a store is the user's decision (see the store check), never the agent's.
+				fix, by = "first machine only: "+fix+" -new-store", "user"
+			}
 		}
-		status := "fail"
 		detail := "no config at " + o.config
 		if !keyOK || storeRoot == "" {
 			detail += " (fix the items above first)"
 		}
-		add(check{Name: "config", Status: status, Detail: detail, Fix: fix, By: "agent"})
+		add(check{Name: "config", Status: "fail", Detail: detail, Fix: fix, By: by})
 	}
 
 	rep.Ready = true

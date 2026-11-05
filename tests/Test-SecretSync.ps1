@@ -72,7 +72,7 @@ $fakeValues = @(Select-String -Path (Join-Path $aRoot "$proj\.env"), (Join-Path 
 
 # ---------------------------------------------------------------- init
 Write-Host "== init"
-$r = SS 'a' @('init', '-Machine', 'machine-A', '-ProjectsRoot', $aRoot, '-StoreRoot', $StoreRoot, '-IdentityFile', $IdentityFile, '-StateDir', (Join-Path $work 'state-a'))
+$r = SS 'a' @('init', '-Machine', 'machine-A', '-ProjectsRoot', $aRoot, '-StoreRoot', $StoreRoot, '-IdentityFile', $IdentityFile, '-StateDir', (Join-Path $work 'state-a'), '-new-store')
 Check 'init A' ($r.Code -eq 0) $r.Out
 $r = SS 'b' @('init', '-Machine', 'machine-B', '-ProjectsRoot', $bRoot, '-StoreRoot', $StoreRoot, '-IdentityFile', $IdentityFile, '-StateDir', (Join-Path $work 'state-b'))
 Check 'init B (same key accepted)' ($r.Code -eq 0) $r.Out
@@ -112,8 +112,11 @@ Check 'second push is a no-op (6 in-sync)' ((Count-Status $r 'in-sync') -eq 6 -a
 Write-Host "== pull on B"
 $r = SS 'b' @('status')
 Check 'B status: 6 remote-new' ((Count-Status $r 'remote-new') -eq 6) $r.Out
+Check 'B is told this is the FIRST SYNC of the project' ($r.Out -match 'FIRST SYNC of demo-project on this machine: 0 identical, 0 differ, 6 only in the store, 0 only here') $r.Out
 $r = SS 'b' @('pull', $proj)
 Check 'B pull exit 0' ($r.Code -eq 0) $r.Out
+$r = SS 'b' @('status', $proj)
+Check 'no FIRST SYNC notice once synced' ($r.Out -notmatch 'FIRST SYNC') $r.Out
 foreach ($f in $secretFiles) { Check "identical after pull: $f" (Same $f) }
 
 # ---------------------------------------------------------------- change on A
@@ -180,6 +183,7 @@ $r = SS 'b' @('status', $proj); Check 'missing-locally detected' ((Count-Status 
 $r = SS 'b' @('pull', $proj); Check 'pull restores missing file' (Same '.secrets\pfx_password') $r.Out
 Remove-Item (Join-Path $work 'state-b\demo-project.json')
 $r = SS 'b' @('status', $proj); Check 'lost state: identical files show in-sync*' ((Count-Status $r 'in-sync*') -eq 7) $r.Out
+Check '...reported as a first sync with 7 identical' ($r.Out -match 'FIRST SYNC of demo-project on this machine: 7 identical, 0 differ') $r.Out
 $r = SS 'b' @('pull', $proj); Check 'pull re-links without rewriting' ($r.Out -match 'linked' -and $r.Out -notmatch 'pulled') $r.Out
 
 # ---------------------------------------------------------------- doctor / keygen
@@ -194,11 +198,28 @@ function SSRaw([string[]]$a) {
 $r = SSRaw @('doctor', '-config', $freshCfg, '-identity', $freshKey, '-store-root', $freshStore)
 Check 'fresh machine: not ready (exit 2)' ($r.Code -eq 2) $r.Out
 Check 'suggests keygen for a brand-new store' ($r.Out -match 'secret-sync keygen') $r.Out
-Check 'suggests init, to be run by the agent' ($r.Out -match 'fix \(agent\):\s+secret-sync init') $r.Out
-$r = SSRaw @('keygen', '-identity', $freshKey)
+Check 'a new store is the user''s decision (init -new-store, fix for you)' ($r.Out -match 'fix \(you\):\s+first machine only: secret-sync init .*-new-store') $r.Out
+$r = SSRaw @('keygen', '-identity', $freshKey, '-store-root', $freshStore, '-config', $freshCfg)
 Check 'keygen creates a key and prints the public key' ($r.Code -eq 0 -and (Test-Path $freshKey) -and $r.Out -match 'Public key: age1') $r.Out
-$r = SSRaw @('keygen', '-identity', $freshKey)
+$r = SSRaw @('keygen', '-identity', $freshKey, '-store-root', $freshStore, '-config', $freshCfg)
 Check 'keygen refuses to overwrite' ($r.Code -eq 1 -and $r.Out -match 'refusing') $r.Out
+
+Write-Host "== store guard: never create a second store by accident"
+$guardKey = Join-Path $work 'guard-key.txt'
+$r = SSRaw @('keygen', '-identity', $guardKey, '-store-root', $StoreRoot)
+Check 'keygen refuses when a store already exists' ($r.Code -eq 1 -and $r.Out -match 'already exists' -and -not (Test-Path $guardKey)) $r.Out
+$r = SSRaw @('keygen', '-identity', $guardKey, '-store-root', $StoreRoot, '-force')
+Check '...unless -force' ($r.Code -eq 0 -and (Test-Path $guardKey)) $r.Out
+$noStore = Join-Path $work 'not-synced-yet\dev-secrets'
+$r = SSRaw @('init', '-config', (Join-Path $work 'guard-config.json'), '-machine', 'm', '-projects-root', $aRoot, '-store-root', $noStore, '-identity', $IdentityFile)
+Check 'init without -new-store refuses to create a store' ($r.Code -eq 1 -and $r.Out -match '-new-store' -and -not (Test-Path $noStore)) $r.Out
+Check '...and writes no config' (-not (Test-Path (Join-Path $work 'guard-config.json'))) $r.Out
+$halfSynced = Join-Path $work 'half-synced\dev-secrets'
+New-Item -ItemType Directory -Force (Join-Path $halfSynced 'some-project') | Out-Null
+$r = SSRaw @('init', '-config', (Join-Path $work 'guard-config.json'), '-machine', 'm', '-projects-root', $aRoot, '-store-root', $halfSynced, '-identity', $IdentityFile, '-new-store')
+Check 'init -new-store refuses a non-empty folder without recipients.txt' ($r.Code -eq 1 -and $r.Out -match 'not empty' -and -not (Test-Path (Join-Path $halfSynced 'recipients.txt'))) $r.Out
+$r = SSRaw @('init', '-config', (Join-Path $work 'guard-config.json'), '-machine', 'm', '-projects-root', $aRoot, '-store-root', $noStore, '-identity', $IdentityFile, '-new-store')
+Check 'init -new-store creates a store in an empty place' ($r.Code -eq 0 -and (Test-Path (Join-Path $noStore 'recipients.txt'))) $r.Out
 $r = SSRaw @('doctor', '-config', $freshCfg, '-identity', $freshKey, '-store-root', $StoreRoot)
 Check 'doctor rejects a key that does not match the store' ($r.Code -eq 2 -and $r.Out -match "not the store's key") $r.Out
 $r = SSRaw @('doctor', '-config', (Join-Path $work 'a-config.json'))

@@ -38,8 +38,8 @@ const usage = `secret-sync: sync gitignored secret files between machines via an
 
 Usage:
   secret-sync doctor  [-json] [-store-root DIR] [-identity FILE]   check this machine, show fixes
-  secret-sync keygen  [-identity FILE]                             create a new age key (first machine only)
-  secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE [-state-dir DIR]
+  secret-sync keygen  [-identity FILE] [-store-root DIR] [-force]  create a new age key (first machine only)
+  secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE [-state-dir DIR] [-new-store]
   secret-sync status  [PROJECT | PROJECT/PATH ...] [-discover] [-show-tracked]
   secret-sync include PROJECT/PATTERN ...          add to the project's manifest (creates it)
   secret-sync exclude PROJECT/PATTERN ...          never sync matching files
@@ -57,7 +57,9 @@ Flags:
   -show-tracked   status: also list candidate files already tracked by git
   -json           doctor: machine-readable output
   -dry-run        show what would happen, change nothing
-  -force          overwrite on conflict, after you decided which side wins
+  -force          overwrite on conflict, after you decided which side wins;
+                  keygen: create a key even though a store already exists
+  -new-store      init: create a brand-new store (only on your very first machine)
 
 Statuses:
   new, local-changed, missing-in-store        -> push
@@ -81,6 +83,7 @@ type options struct {
 	command, config                                      string
 	targets                                              []string
 	discover, showTracked, force, dryRun, help, json     bool
+	newStore                                             bool
 	machine, projectsRoot, storeRoot, identity, stateDir string
 }
 
@@ -182,6 +185,8 @@ func parseArgs(args []string) (*options, error) {
 			o.showTracked = true
 		case "json":
 			o.json = true
+		case "newstore":
+			o.newStore = true
 		case "version", "v":
 			pos = append([]string{"version"}, pos...)
 		case "force":
@@ -232,20 +237,14 @@ func cmdInit(o *options) error {
 		return err
 	}
 	pub := id.Recipient().String() // public key only
-	if err := os.MkdirAll(o.storeRoot, 0o700); err != nil {
-		return err
-	}
 	rec := filepath.Join(o.storeRoot, "recipients.txt")
 	if data, err := os.ReadFile(rec); err == nil {
 		if !strings.Contains(string(data), pub) {
 			return fmt.Errorf("this key (%s) is not in %s; use the same key on every machine (restore it from your backup)", pub, rec)
 		}
 		fmt.Println("recipients.txt already lists this key.")
-	} else {
-		if err := os.WriteFile(rec, []byte("# age recipients for secret-sync (public keys only)\n"+pub+"\n"), 0o644); err != nil {
-			return err
-		}
-		fmt.Println("Created recipients.txt with public key", pub)
+	} else if err := createStore(o.storeRoot, rec, pub, o.newStore); err != nil {
+		return err
 	}
 	cfg := config{Machine: o.machine, ProjectsRoot: o.projectsRoot, StoreRoot: o.storeRoot,
 		IdentityFile: o.identity, StateDir: o.stateDir, Exclude: []string{}}
@@ -256,6 +255,33 @@ func cmdInit(o *options) error {
 		return err
 	}
 	fmt.Printf("Wrote config %s (machine=%s)\n", o.config, o.machine)
+	return nil
+}
+
+// createStore sets up a brand-new store. It must be explicit (-new-store): a missing
+// recipients.txt can also mean the sync app has not finished downloading an existing
+// store, and creating a second store with another key would split the machines.
+func createStore(storeRoot, rec, pub string, newStore bool) error {
+	if !newStore {
+		return fmt.Errorf("no store found at %s (no recipients.txt).\n"+
+			"  - If you already use secret-sync on another machine: wait until the sync app has finished\n"+
+			"    downloading that folder, then run init again. Do not create a new key.\n"+
+			"  - Only if this is your very first machine: run init again with -new-store", storeRoot)
+	}
+	if des, err := os.ReadDir(storeRoot); err == nil {
+		for _, d := range des {
+			if n := strings.ToLower(d.Name()); n != "desktop.ini" && n != ".ds_store" {
+				return fmt.Errorf("%s is not empty but has no recipients.txt: the sync may be incomplete, or the folder is used for something else. Refusing to create a store there", storeRoot)
+			}
+		}
+	}
+	if err := os.MkdirAll(storeRoot, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(rec, []byte("# age recipients for secret-sync (public keys only)\n"+pub+"\n"), 0o644); err != nil {
+		return err
+	}
+	fmt.Println("Created a new store with public key", pub)
 	return nil
 }
 

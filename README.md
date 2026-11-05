@@ -66,7 +66,7 @@ detects **conflicts** (changed on both).
 ```
 secret-sync doctor  [-json]           check this machine; prints each fix and who should run it
 secret-sync keygen  [-identity FILE]  create a new age key (first machine only)
-secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE
+secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE [-new-store]
 secret-sync status  [PROJECT | PROJECT/PATH ...] [-discover] [-show-tracked]
 secret-sync include PROJECT/PATTERN ...
 secret-sync exclude PROJECT/PATTERN ...
@@ -84,6 +84,11 @@ projects root, to find ones without a manifest yet.
 | `remote-new`, `remote-changed`, `missing-locally` | The store has something this machine lacks | `pull` |
 | `in-sync` / `in-sync*` | Identical (`*`: not linked yet, any push/pull links it) | — |
 | `conflict` | Changed on both sides | Decide, then `push -force` or `pull -force` |
+
+When a machine has never synced a project, `status` says so:
+`FIRST SYNC of myapp on this machine: 14 identical, 2 differ, 1 only in the store, 0 only here`.
+Files that differ are conflicts, so nothing is overwritten; the Claude Code skill asks you what
+to do before its first pull or push of that project.
 
 Built-in rules that are facts, not decisions: candidates already **tracked by git** are hidden
 (git syncs them; `-show-tracked` lists them), public CA bundles such as `cacert.pem` are never
@@ -123,7 +128,10 @@ In short:
    Back it up in your password manager right away.
    **Other machines:** restore that same key file from your backup.
 2. Mark the store folder (default `<Google Drive>/dev-secrets`) as *available offline*.
-3. `secret-sync init ...` with the values `doctor` suggests.
+3. `secret-sync init ...` with the values `doctor` suggests. On the very first machine only, add
+   `-new-store`: `init` never creates a store implicitly, because a missing store can also mean the
+   sync app has not finished downloading it (and a second store would split your machines).
+   `keygen` likewise refuses when a store already exists.
 4. `secret-sync pull` in each project.
 
 ### Download

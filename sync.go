@@ -34,6 +34,10 @@ type row struct{ project, path, status, git, result string }
 type projectReport struct {
 	hiddenTracked int
 	noManifest    bool
+	// firstSync: this machine has never synced the project (no local state yet).
+	// The counts describe how the local files compare with the store.
+	firstSync                               bool
+	identical, differ, storeOnly, localOnly int
 }
 
 // Google Drive names conflicting copies like ".env (1).age".
@@ -56,7 +60,6 @@ func (a *app) sync() int {
 		if err != nil {
 			return fail(err)
 		}
-		reports[p] = rep
 		for _, e := range entries {
 			st, err := a.status(e)
 			result := ""
@@ -65,12 +68,25 @@ func (a *app) sync() int {
 			} else {
 				result = a.act(e, st)
 			}
+			if rep.firstSync {
+				switch st {
+				case "in-sync*":
+					rep.identical++
+				case "conflict":
+					rep.differ++
+				case "remote-new":
+					rep.storeOnly++
+				case "new":
+					rep.localOnly++
+				}
+			}
 			if strings.HasPrefix(result, "REFUSED") || strings.HasPrefix(result, "SKIPPED") || strings.HasPrefix(result, "ERROR") ||
 				(o.command == "status" && st == "conflict") {
 				problems++
 			}
 			rows = append(rows, row{p, e.Rel, st, gitNote(e.Git), result})
 		}
+		reports[p] = rep
 	}
 	a.print(rows, projects, reports)
 	if problems > 0 {
@@ -125,6 +141,13 @@ func (a *app) print(rows []row, projects []string, reports map[string]projectRep
 	fmt.Printf("\n[%s] %s\n", a.cfg.Machine, strings.Join(parts, "  "))
 	if hidden > 0 {
 		fmt.Printf("%d candidate file(s) already tracked by git are hidden (git syncs them; -show-tracked lists them).\n", hidden)
+	}
+	for _, p := range projects {
+		r := reports[p]
+		if r.firstSync && r.identical+r.differ+r.storeOnly+r.localOnly > 0 {
+			fmt.Printf("FIRST SYNC of %s on this machine: %d identical, %d differ, %d only in the store, %d only here.\n",
+				p, r.identical, r.differ, r.storeOnly, r.localOnly)
+		}
 	}
 	if len(noManifest) > 0 {
 		fmt.Printf("No manifest yet (not synced): %s. Decide with: secret-sync include|exclude PROJECT/PATTERN\n", strings.Join(noManifest, ", "))
@@ -212,6 +235,7 @@ func (a *app) entries(project string) ([]*entry, projectReport, error) {
 		return nil, rep, err
 	}
 	rep.noManifest = !hasManifest
+	rep.firstSync = len(state) == 0
 
 	type info struct {
 		cat     string
