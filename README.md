@@ -11,6 +11,28 @@ to the project root, so a fresh clone on another machine gets exactly its own fi
 
 It is designed to be driven by an AI coding agent (a Claude Code skill), but works fine by hand.
 
+## Use it with Claude Code
+
+This repository is also a Claude Code plugin marketplace. Install the plugin:
+
+```
+/plugin install secret-sync --marketplace jkiipper/secret-sync
+```
+
+(or `claude plugin marketplace add jkiipper/secret-sync` then
+`claude plugin install secret-sync@jkiipper`).
+
+Then just ask, in any project: *"set up secret-sync on this machine"*, *"pull this project's
+secrets"*, *"is anything here not synced?"*. The skill
+([`plugin/skills/secret-sync/SKILL.md`](plugin/skills/secret-sync/SKILL.md)):
+
+- installs the binary with a checksum-verified bootstrap, or shows you the command if you
+  reserve installs for yourself;
+- runs `doctor` and walks you through what is missing, doing the parts an agent may do;
+- in each project, pulls what changed elsewhere, proposes which new files to include or
+  exclude (judging them by name and path only), and asks before every push;
+- never reads, prints or asks for secret values.
+
 ## How it works
 
 ```

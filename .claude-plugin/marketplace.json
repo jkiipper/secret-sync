@@ -1,0 +1,14 @@
+{
+  "name": "jkiipper",
+  "description": "Plugins by jkiipper",
+  "owner": {
+    "name": "jkiipper"
+  },
+  "plugins": [
+    {
+      "name": "secret-sync",
+      "source": "./plugin",
+      "description": "Sync each project's gitignored secret files between your machines through an age-encrypted folder (e.g. Google Drive), and set up new machines."
+    }
+  ]
+}

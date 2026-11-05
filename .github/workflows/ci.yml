@@ -32,6 +32,50 @@ jobs:
             echo "ok $target"
           done
 
+  # The bootstrap scripts on real Windows, macOS and Linux runners, fed from a local
+  # "release" built here: checksum OK installs; a tampered SHA256SUMS must be refused.
+  bootstrap:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: build a local release for this runner
+        shell: bash
+        run: |
+          os="$(go env GOOS)"; arch="$(go env GOARCH)"; ext=""; [ "$os" = "windows" ] && ext=".exe"
+          mkdir -p rel bad
+          CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.0-ci" -o "rel/secret-sync-$os-$arch$ext" .
+          cd rel
+          if command -v sha256sum >/dev/null; then sha256sum secret-sync-* > SHA256SUMS; else shasum -a 256 secret-sync-* > SHA256SUMS; fi
+          cd ..
+          cp rel/* bad/
+          awk '{ $1 = "0000000000000000000000000000000000000000000000000000000000000000"; print }' rel/SHA256SUMS > bad/SHA256SUMS
+      - name: bootstrap.sh (macOS / Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          SECRET_SYNC_SOURCE_DIR=rel SECRET_SYNC_INSTALL_DIR="$RUNNER_TEMP/bin" sh plugin/skills/secret-sync/scripts/bootstrap.sh
+          "$RUNNER_TEMP/bin/secret-sync" version | grep -q v0.0.0-ci
+          if SECRET_SYNC_SOURCE_DIR=bad SECRET_SYNC_INSTALL_DIR="$RUNNER_TEMP/bad" sh plugin/skills/secret-sync/scripts/bootstrap.sh; then
+            echo "tampered checksum was accepted"; exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bad/secret-sync"
+      - name: bootstrap.ps1 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./plugin/skills/secret-sync/scripts/bootstrap.ps1 -SourceDir rel -InstallDir "$env:RUNNER_TEMP\bin" -NoPath
+          if (-not ((& "$env:RUNNER_TEMP\bin\secret-sync.exe" version) -match 'v0.0.0-ci')) { throw 'wrong version' }
+          $failed = $false
+          try { ./plugin/skills/secret-sync/scripts/bootstrap.ps1 -SourceDir bad -InstallDir "$env:RUNNER_TEMP\bad" -NoPath } catch { $failed = $true }
+          if (-not $failed) { throw 'tampered checksum was accepted' }
+          if (Test-Path "$env:RUNNER_TEMP\bad\secret-sync.exe") { throw 'binary installed despite mismatch' }
+
   e2e-windows:
     runs-on: windows-latest
     steps:
