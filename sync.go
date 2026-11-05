@@ -125,20 +125,22 @@ func (a *app) print(rows []row, projects []string, reports map[string]projectRep
 			noManifest = append(noManifest, p)
 		}
 	}
-	counts := map[string]int{}
+	counts, done := map[string]int{}, map[string]int{}
 	for _, r := range rows {
 		counts[r.status]++
+		if k := resultKind(r.result); k != "" {
+			done[k]++
+		}
 	}
-	keys := make([]string, 0, len(counts))
-	for k := range counts {
-		keys = append(keys, k)
+	// Statuses are measured before acting; "done" says what this run changed, so a
+	// resolved conflict does not look unresolved.
+	line := "[" + a.cfg.Machine + "] "
+	if len(done) > 0 {
+		line += "before: " + countList(counts) + " | done: " + countList(done)
+	} else {
+		line += countList(counts)
 	}
-	sort.Strings(keys)
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = fmt.Sprintf("%s=%d", k, counts[k])
-	}
-	fmt.Printf("\n[%s] %s\n", a.cfg.Machine, strings.Join(parts, "  "))
+	fmt.Printf("\n%s\n", line)
 	if hidden > 0 {
 		fmt.Printf("%d candidate file(s) already tracked by git are hidden (git syncs them; -show-tracked lists them).\n", hidden)
 	}
@@ -152,6 +154,37 @@ func (a *app) print(rows []row, projects []string, reports map[string]projectRep
 	if len(noManifest) > 0 {
 		fmt.Printf("No manifest yet (not synced): %s. Decide with: secret-sync include|exclude PROJECT/PATTERN\n", strings.Join(noManifest, ", "))
 	}
+}
+
+// resultKind maps an action result to a short label: pushed, pulled, linked,
+// would-push, would-pull, would-link, skipped, refused, error ("" if nothing happened).
+func resultKind(result string) string {
+	switch {
+	case result == "":
+		return ""
+	case strings.HasPrefix(result, "would "):
+		return "would-" + strings.TrimPrefix(result, "would ")
+	case strings.HasPrefix(result, "SKIPPED"):
+		return "skipped"
+	case strings.HasPrefix(result, "REFUSED"):
+		return "refused"
+	case strings.HasPrefix(result, "ERROR"):
+		return "error"
+	}
+	return strings.Fields(result)[0] // pushed, pulled, linked
+}
+
+func countList(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%s=%d", k, m[k])
+	}
+	return strings.Join(parts, "  ")
 }
 
 // ---- selection -------------------------------------------------------------
@@ -480,8 +513,9 @@ func (a *app) pull(e *entry, backup bool) string {
 	if err := a.decryptFile(e.Store, tmp); err != nil {
 		return "ERROR: " + err.Error()
 	}
+	bk := ""
 	if backup && e.LocalExists {
-		bk := filepath.Join(a.cfg.StateDir, "backup", e.Project, e.Rel+"."+time.Now().Format("20060102-150405"))
+		bk = filepath.Join(a.cfg.StateDir, "backup", e.Project, e.Rel+"."+time.Now().Format("20060102-150405"))
 		if err := copyFile(e.Local, bk); err != nil {
 			return "ERROR: backup failed, nothing changed: " + err.Error()
 		}
@@ -497,8 +531,8 @@ func (a *app) pull(e *entry, backup bool) string {
 	if err := a.saveState(e.Project, e.Rel, plain, cipher); err != nil {
 		return "ERROR: " + err.Error()
 	}
-	if backup {
-		return "pulled (local copy backed up)"
+	if bk != "" {
+		return "pulled (local copy backed up to " + bk + ")"
 	}
 	return "pulled"
 }

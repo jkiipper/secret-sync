@@ -106,7 +106,8 @@ Check 'A status: 6 new files' ((Count-Status $r 'new') -eq 6) $r.Out
 $r = SS 'a' @('push', $proj, '-DryRun')
 Check 'dry-run writes nothing' (@(Get-ChildItem (Join-Path $StoreRoot $proj) -Recurse -Filter *.age).Count -eq 0) $r.Out
 $r = SS 'a' @('push', $proj)
-Check 'A push: 6 pushed' (([regex]::Matches($r.Out, 'pushed')).Count -eq 6) $r.Out
+Check 'A push: 6 pushed' (([regex]::Matches($r.Out, '(?m)\spushed\s*$')).Count -eq 6) $r.Out
+Check 'summary counts what was done' ($r.Out.Contains('before: new=6 | done: pushed=6')) $r.Out
 Check 'store holds 6 .age files' (@(Get-ChildItem (Join-Path $StoreRoot $proj) -Recurse -Filter *.age).Count -eq 6)
 $r = SS 'a' @('push', $proj)
 Check 'second push is a no-op (6 in-sync)' ((Count-Status $r 'in-sync') -eq 6 -and $r.Out -notmatch 'pushed') $r.Out
@@ -148,6 +149,8 @@ $r = SS 'b' @('pull', $proj)
 Check 'B pull refuses to overwrite' ($r.Out -match 'SKIPPED' -and $r.Code -eq 2) $r.Out
 $r = SS 'b' @('pull', "$proj\local.env", '-Force')
 Check 'B forced pull backs up local copy' ($r.Out -match 'backed up') $r.Out
+Check '...and says where' ($r.Out -match 'backed up to .+backup.demo-project.local\.env\.\d{8}-\d{6}\)') $r.Out
+Check 'a resolved conflict is reported as done' ($r.Out.Contains('before: conflict=1 | done: pulled=1')) $r.Out
 Check 'backup file exists' (@(Get-ChildItem (Join-Path $work 'state-b\backup') -Recurse -File).Count -eq 1)
 Check 'identical after resolve: local.env' (Same 'local.env')
 

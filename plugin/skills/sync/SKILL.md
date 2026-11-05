@@ -49,10 +49,16 @@ files, summarize in text and ask about the groups. If the tool is not available,
 
 Run `secret-sync version`. If it is not found, also try the default install location:
 `%LOCALAPPDATA%\Programs\secret-sync\secret-sync.exe` (Windows) or `~/.local/bin/secret-sync`.
-Use the full path for the rest of the session if the shell's PATH is stale.
+Use the full path for the rest of the session if the shell's PATH is stale (Claude Code keeps
+the PATH it started with; restarting it after an install also fixes this).
 
-If it is missing, it must be installed (rule 5). The bootstrap downloads the release binary
-for this OS and refuses to install it unless its SHA-256 matches the release's `SHA256SUMS`:
+**This skill needs secret-sync v0.1.3 or newer** (`dev` builds are fine). An older binary lacks
+safeguards this skill relies on, so treat it exactly like a missing one: do not use it, install
+the current release first. The bootstrap replaces the old binary.
+
+If it is missing or too old, it must be installed (rule 5). The bootstrap downloads the latest
+release binary for this OS and refuses to install it unless its SHA-256 matches the release's
+`SHA256SUMS`:
 
 - Windows: `powershell -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/scripts/bootstrap.ps1"`
 - macOS / Linux: `sh "${CLAUDE_SKILL_DIR}/scripts/bootstrap.sh"`
@@ -91,7 +97,9 @@ Run `secret-sync status <project>`.
 **First sync of a project on this machine.** If the output has a line
 `FIRST SYNC of <project> on this machine: N identical, N differ, N only in the store, N only here`,
 this machine has never synced the project and its existing files may be newer or older than the
-store's. Do not pull or push anything yet. Show the summary and ask (AskUserQuestion):
+store's. Treat it as a first sync **also when that line is missing** but you ran `init` in this
+session, or the user says the project was never synced here. Do not pull or push anything yet.
+Show the summary (from the line, or counted from the status rows) and ask (AskUserQuestion):
 
 - *identical*: nothing to decide; the next pull or push only links them.
 - *differ* (shown as `conflict`): keep this machine's copy (push `-force` after a second
