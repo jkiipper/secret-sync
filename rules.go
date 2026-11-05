@@ -19,10 +19,14 @@ func lowerSet(items ...string) map[string]bool {
 	return m
 }
 
-// Folders never descended into (dependencies, build output, VCS, IDE).
+// Folders never descended into (dependencies, build output, VCS, IDE, and Claude
+// Code's own folder: its settings and worktrees are not project secrets).
 var pruneDirs = lowerSet("node_modules", ".git", "bin", "obj", "dist", "build", "out", ".venv", "venv", "env",
 	"__pycache__", "vendor", ".idea", ".vs", ".vscode", ".next", ".nuxt", "target", "packages",
-	".gradle", "coverage", ".cache", ".terraform", ".angular", ".svelte-kit", "Pods", "DerivedData")
+	".gradle", "coverage", ".cache", ".terraform", ".angular", ".svelte-kit", "Pods", "DerivedData", ".claude")
+
+// Well-known public files that match secret-looking names but are never secrets.
+var publicFiles = lowerSet("cacert.pem", "ca-bundle.crt", "ca-certificates.crt")
 
 // Folder names whose files are all considered secrets.
 var secretDirs = lowerSet(".secrets", "secrets", ".secret", "secret", "credentials", ".credentials", "certs", ".certs", "keys", ".keys")
@@ -48,6 +52,8 @@ func category(name string, inSecretDir bool) string {
 	n := strings.ToLower(name)
 	ext := strings.ToLower(filepath.Ext(n))
 	switch {
+	case publicFiles[n]:
+		return ""
 	case reExampleEnv.MatchString(n) || reExampleAny.MatchString(n):
 		return "example"
 	case reSSHKey.MatchString(n) || ext == ".ppk":
@@ -67,20 +73,21 @@ func category(name string, inSecretDir bool) string {
 }
 
 func isCandidate(name string, inSecretDir bool) bool {
-	if strings.HasSuffix(strings.ToLower(name), ".pub") {
+	if n := strings.ToLower(name); strings.HasSuffix(n, ".pub") || publicFiles[n] {
 		return false
 	}
 	return inSecretDir || category(name, false) != ""
 }
 
-type candidate struct {
+type projectFile struct {
 	rel      string // relative to the project root, OS separators
-	inSecret bool
+	inSecret bool   // inside a folder such as .secrets/
 }
 
-// findCandidates lists sensitive-looking files of a project, by name only.
-func findCandidates(projectDir string) []candidate {
-	var out []candidate
+// walkFiles lists the regular files of a project, skipping dependency, build,
+// VCS and IDE folders. Names only; nothing is opened.
+func walkFiles(projectDir string) []projectFile {
+	var out []projectFile
 	_ = filepath.WalkDir(projectDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
@@ -111,9 +118,7 @@ func findCandidates(projectDir string) []candidate {
 				break
 			}
 		}
-		if isCandidate(d.Name(), inSecret) {
-			out = append(out, candidate{rel: rel, inSecret: inSecret})
-		}
+		out = append(out, projectFile{rel: rel, inSecret: inSecret})
 		return nil
 	})
 	return out
@@ -143,24 +148,4 @@ func wildcardMatch(pattern, s string) bool {
 		wildcardCache[pattern] = re
 	}
 	return re.MatchString(s)
-}
-
-func loadIgnore(p string) []string {
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			out = append(out, strings.ReplaceAll(line, "/", `\`))
-		}
-	}
-	return out
-}
-
-// ignoreKey is "<project>\<relative path>" with backslashes on every OS.
-func ignoreKey(project, rel string) string {
-	return project + `\` + strings.ReplaceAll(filepath.ToSlash(rel), "/", `\`)
 }

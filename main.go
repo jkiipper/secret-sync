@@ -3,10 +3,15 @@
 //
 // Store layout:
 //
+//	<storeRoot>/recipients.txt                           age public keys
+//	<storeRoot>/<project>/secret-sync.json               manifest: include/exclude patterns
 //	<storeRoot>/<project>/<relative path>.age            encrypted file
 //	<storeRoot>/<project>/<relative path>.age.meta.json  who/when pushed
-//	<storeRoot>/recipients.txt                           age public keys
-//	<storeRoot>/ignore.txt                               <project>\<path> wildcards never synced
+//
+// A project is synced only when it has a manifest (opt-in). The manifest lists,
+// relative to the project root, which files are included and which are excluded.
+// Sensitive-looking files covered by neither are reported as "candidate" so the
+// person or agent working on the project can decide.
 //
 // Local state (per machine, not synced): <stateDir>/<project>.json holds hashes of
 // the last synced plaintext and ciphertext, to tell "changed here" from
@@ -32,22 +37,29 @@ import (
 const usage = `secret-sync: sync gitignored secret files between machines via an age-encrypted folder.
 
 Usage:
-  secret-sync init   -machine NAME -projects-root DIR -store-root DIR -identity FILE [-state-dir DIR]
-  secret-sync status [PROJECT | PROJECT/PATH ...] [-discover]
-  secret-sync push   PROJECT | PROJECT/PATH ...    [-dry-run] [-force]
-  secret-sync pull   [PROJECT | PROJECT/PATH ...]  [-dry-run] [-force]
-  secret-sync ignore PROJECT/PATH-WILDCARD ...
+  secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE [-state-dir DIR]
+  secret-sync status  [PROJECT | PROJECT/PATH ...] [-discover] [-show-tracked]
+  secret-sync include PROJECT/PATTERN ...          add to the project's manifest (creates it)
+  secret-sync exclude PROJECT/PATTERN ...          never sync matching files
+  secret-sync push    PROJECT | PROJECT/PATH ...    [-dry-run] [-force]
+  secret-sync pull    [PROJECT | PROJECT/PATH ...]  [-dry-run] [-force]
+
+Patterns are relative to the project root, use "/" and may contain * and ?
+(case-insensitive; * also matches across folders). Example:
+  secret-sync include myapp/.env myapp/.secrets/*
 
 Flags:
-  -config FILE  config file (default ~/.config/secret-sync/config.json)
-  -discover     status: scan every project under projects-root for new candidate files
-  -dry-run      show what would happen, change nothing
-  -force        overwrite on conflict, after you decided which side wins
+  -config FILE    config file (default ~/.config/secret-sync/config.json)
+  -discover       status: also scan projects that have no manifest yet
+  -show-tracked   status: also list candidate files already tracked by git
+  -dry-run        show what would happen, change nothing
+  -force          overwrite on conflict, after you decided which side wins
 
 Statuses:
   new, local-changed, missing-in-store        -> push
   remote-new, remote-changed, missing-locally -> pull
-  in-sync, in-sync* (identical but not linked yet), conflict (changed on both sides), ignored
+  in-sync, in-sync* (identical but not linked yet), conflict (changed on both sides)
+  candidate: looks sensitive but is not in the manifest -> include or exclude it
 
 Exit codes: 0 ok, 1 error, 2 conflicts or refused/skipped files.
 `
@@ -58,17 +70,13 @@ type config struct {
 	StoreRoot    string   `json:"storeRoot"`
 	IdentityFile string   `json:"identityFile"`
 	StateDir     string   `json:"stateDir"`
-	Exclude      []string `json:"exclude"`
+	Exclude      []string `json:"exclude"` // project folders skipped by "status -discover"
 }
-
-// defaultExclude lists project folders that "status -discover" skips. Empty by default;
-// each machine can set "exclude" in its config file.
-var defaultExclude = []string{}
 
 type options struct {
 	command, config                                      string
 	targets                                              []string
-	discover, force, dryRun, help                        bool
+	discover, showTracked, force, dryRun, help           bool
 	machine, projectsRoot, storeRoot, identity, stateDir string
 }
 
@@ -88,7 +96,7 @@ func run(args []string) int {
 			return fail(err)
 		}
 		return 0
-	case "status", "push", "pull", "ignore":
+	case "status", "push", "pull", "include", "exclude":
 	default:
 		return fail(fmt.Errorf("unknown command %q (try: secret-sync help)", o.command))
 	}
@@ -100,8 +108,8 @@ func run(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	if o.command == "ignore" {
-		if err := a.addIgnores(o.targets); err != nil {
+	if o.command == "include" || o.command == "exclude" {
+		if err := a.editManifest(o.command, o.targets); err != nil {
 			return fail(err)
 		}
 		return 0
@@ -156,6 +164,8 @@ func parseArgs(args []string) (*options, error) {
 			o.stateDir, err = next(a, val, hasVal)
 		case "discover":
 			o.discover = true
+		case "showtracked":
+			o.showTracked = true
 		case "force":
 			o.force = true
 		case "dryrun":
@@ -219,14 +229,11 @@ func cmdInit(o *options) error {
 		}
 		fmt.Println("Created recipients.txt with public key", pub)
 	}
-	ign := filepath.Join(o.storeRoot, "ignore.txt")
-	if !isFile(ign) {
-		if err := os.WriteFile(ign, []byte("# <project>\\<relative path> wildcards that secret-sync never syncs\n"), 0o644); err != nil {
-			return err
-		}
-	}
 	cfg := config{Machine: o.machine, ProjectsRoot: o.projectsRoot, StoreRoot: o.storeRoot,
-		IdentityFile: o.identity, StateDir: o.stateDir, Exclude: defaultExclude}
+		IdentityFile: o.identity, StateDir: o.stateDir, Exclude: []string{}}
+	if old := (config{}); isFile(o.config) && readJSON(o.config, &old) == nil && old.Exclude != nil {
+		cfg.Exclude = old.Exclude // keep the user's discover exclusions when re-running init
+	}
 	if err := writeJSON(o.config, cfg); err != nil {
 		return err
 	}
@@ -235,11 +242,10 @@ func cmdInit(o *options) error {
 }
 
 type app struct {
-	o       *options
-	cfg     config
-	ids     []age.Identity
-	recips  []age.Recipient
-	ignores []string
+	o      *options
+	cfg    config
+	ids    []age.Identity
+	recips []age.Recipient
 }
 
 func newApp(o *options) (*app, error) {
@@ -254,11 +260,8 @@ func newApp(o *options) (*app, error) {
 	if c.Machine == "" || c.ProjectsRoot == "" || c.StoreRoot == "" || c.IdentityFile == "" || c.StateDir == "" {
 		return nil, errors.New("config is incomplete; run init again")
 	}
-	if a.cfg.Exclude == nil {
-		a.cfg.Exclude = defaultExclude
-	}
 	if !isDir(c.StoreRoot) {
-		return nil, fmt.Errorf("store folder not found: %s (is Google Drive running?)", c.StoreRoot)
+		return nil, fmt.Errorf("store folder not found: %s (is the sync service running?)", c.StoreRoot)
 	}
 	var err error
 	if a.ids, err = loadIdentities(c.IdentityFile); err != nil {
@@ -272,25 +275,5 @@ func newApp(o *options) (*app, error) {
 	if a.recips, err = age.ParseRecipients(rf); err != nil {
 		return nil, fmt.Errorf("recipients.txt: %w", err)
 	}
-	a.ignores = loadIgnore(filepath.Join(c.StoreRoot, "ignore.txt"))
 	return a, nil
-}
-
-func (a *app) addIgnores(targets []string) error {
-	if len(targets) == 0 {
-		return errors.New("ignore needs PROJECT/PATH (wildcards allowed)")
-	}
-	f, err := os.OpenFile(filepath.Join(a.cfg.StoreRoot, "ignore.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	for _, t := range targets {
-		p := strings.ReplaceAll(t, "/", `\`)
-		if _, err := fmt.Fprintln(f, p); err != nil {
-			return err
-		}
-		fmt.Println("ignoring", p)
-	}
-	return nil
 }

@@ -55,6 +55,16 @@ New-Item -ItemType Directory -Force (Join-Path $bRoot $proj) | Out-Null
 Copy-Item (Join-Path $aRoot "$proj\.gitignore") (Join-Path $bRoot "$proj\.gitignore")   # simulates a fresh clone
 git -C (Join-Path $bRoot $proj) init -q 2>$null
 
+# Noise that must never be offered: a public CA bundle, Claude Code's own settings,
+# and a secret-looking config already committed to git (hidden unless -show-tracked).
+$aProj = Join-Path $aRoot $proj
+New-Item -ItemType Directory -Force (Join-Path $aProj 'lib\certifi'), (Join-Path $aProj '.claude') | Out-Null
+Set-Content (Join-Path $aProj 'lib\certifi\cacert.pem') 'public CA bundle (fake)'
+Set-Content (Join-Path $aProj '.claude\settings.local.json') '{}'
+Set-Content (Join-Path $aProj 'appsettings.json') '{ "Logging": {} }'
+git -C $aProj add appsettings.json
+git -C $aProj -c user.name=test -c user.email=test@example.invalid commit -q -m 'tracked config' 2>$null
+
 $secretFiles = @('.env', 'local.env', '.secrets\resend_api_key', '.secrets\pfx_password', '.secrets\fake_key.pem', '.secrets\fake_cert.pfx')
 # Fake values that must never appear in any output.
 $fakeValues = @(Select-String -Path (Join-Path $aRoot "$proj\.env"), (Join-Path $aRoot "$proj\local.env") -Pattern 'fake_[A-Za-z0-9]{6,}' -AllMatches |
@@ -67,12 +77,31 @@ Check 'init A' ($r.Code -eq 0) $r.Out
 $r = SS 'b' @('init', '-Machine', 'machine-B', '-ProjectsRoot', $bRoot, '-StoreRoot', $StoreRoot, '-IdentityFile', $IdentityFile, '-StateDir', (Join-Path $work 'state-b'))
 Check 'init B (same key accepted)' ($r.Code -eq 0) $r.Out
 
+# ---------------------------------------------------------------- opt-in manifest
+Write-Host "== no manifest yet: candidates only"
+$r = SS 'a' @('status', $proj)
+Check 'A status: 6 candidates, nothing managed' ((Count-Status $r 'candidate') -eq 6 -and (Count-Status $r 'new') -eq 0) $r.Out
+Check 'reports the missing manifest' ($r.Out -match 'No manifest yet') $r.Out
+Check 'public cacert.pem not offered' ($r.Out -notmatch 'cacert') $r.Out
+Check '.claude settings not offered' ($r.Out -notmatch '\.claude') $r.Out
+Check 'git-tracked appsettings.json hidden and counted' ($r.Out -notmatch 'appsettings' -and $r.Out -match '1 candidate file\(s\) already tracked') $r.Out
+$r = SS 'a' @('status', $proj, '-show-tracked')
+Check '-show-tracked lists it' ($r.Out -match 'appsettings\.json.*NOT GITIGNORED \(TRACKED\)') $r.Out
+$r = SS 'a' @('push', $proj)
+Check 'push without manifest uploads nothing' ($r.Out -notmatch 'pushed' -and -not (Test-Path (Join-Path $StoreRoot $proj))) $r.Out
+$r = SS 'a' @('include', "$proj/.env", "$proj/local.env", "$proj/.secrets/*")
+Check 'include creates the manifest' ($r.Code -eq 0 -and (Test-Path (Join-Path $StoreRoot "$proj\secret-sync.json"))) $r.Out
+$r = SS 'a' @('include', "$proj/.env")
+Check 'include is idempotent' ($r.Out -match 'already listed') $r.Out
+$r = SS 'a' @('include', 'no-such-project/.env')
+Check 'include rejects an unknown project' ($r.Code -eq 1) $r.Out
+
 # ---------------------------------------------------------------- first push
 Write-Host "== first push from A"
 $r = SS 'a' @('status', $proj)
 Check 'A status: 6 new files' ((Count-Status $r 'new') -eq 6) $r.Out
 $r = SS 'a' @('push', $proj, '-DryRun')
-Check 'dry-run writes nothing' (-not (Test-Path (Join-Path $StoreRoot $proj))) $r.Out
+Check 'dry-run writes nothing' (@(Get-ChildItem (Join-Path $StoreRoot $proj) -Recurse -Filter *.age).Count -eq 0) $r.Out
 $r = SS 'a' @('push', $proj)
 Check 'A push: 6 pushed' (([regex]::Matches($r.Out, 'pushed')).Count -eq 6) $r.Out
 Check 'store holds 6 .age files' (@(Get-ChildItem (Join-Path $StoreRoot $proj) -Recurse -Filter *.age).Count -eq 6)
@@ -120,12 +149,29 @@ Check 'identical after resolve: local.env' (Same 'local.env')
 Write-Host "== guards"
 Set-Content (Join-Path $aRoot "$proj\.env.extra") 'EXTRA=fake_EXTRA55555'
 $fakeValues += 'fake_EXTRA55555'
-$r = SS 'a' @('push', $proj)
-Check 'push refuses a file that is not gitignored' ($r.Out -match 'REFUSED' -and $r.Code -eq 2) $r.Out
-Check '...and did not upload it' (-not (Test-Path (Join-Path $StoreRoot "$proj\.env.extra.age")))
-$r = SS 'a' @('ignore', "$proj\.env.extra"); Check 'ignore command' ($r.Code -eq 0) $r.Out
 $r = SS 'a' @('status', $proj)
-Check 'ignored file hidden from status' ($r.Out -notmatch '\.env\.extra' -and $r.Code -eq 0) $r.Out
+Check 'new sensitive file shows up as candidate' ($r.Out -match '\.env\.extra\s+candidate') $r.Out
+$r = SS 'a' @('push', $proj)
+Check 'push leaves candidates alone' ($r.Out -notmatch 'pushed' -and $r.Code -eq 0) $r.Out
+$r = SS 'a' @('include', "$proj/.env.extra"); $r = SS 'a' @('push', $proj)
+Check 'push refuses an included file that is not gitignored' ($r.Out -match 'REFUSED' -and $r.Code -eq 2) $r.Out
+Check '...and did not upload it' (-not (Test-Path (Join-Path $StoreRoot "$proj\.env.extra.age")))
+$r = SS 'a' @('exclude', "$proj/.env.extra"); Check 'exclude command' ($r.Code -eq 0) $r.Out
+$r = SS 'a' @('status', $proj)
+Check 'excluded file hidden from status' ($r.Out -notmatch '\.env\.extra' -and $r.Code -eq 0) $r.Out
+
+Set-Content (Join-Path $aRoot "$proj\service-account.json") '{"private_key":"fake_SAKEY77777"}'
+$fakeValues += 'fake_SAKEY77777'
+$r = SS 'a' @('push', "$proj/service-account.json")
+Check 'explicit push of a candidate is skipped with a hint' ($r.Out -match 'not in the manifest' -and $r.Code -eq 2) $r.Out
+
+Write-Host "== wildcard include covers new files"
+Set-Content (Join-Path $aRoot "$proj\.secrets\new_token") 'fake_NEWTOKEN4444' -NoNewline
+$fakeValues += 'fake_NEWTOKEN4444'
+$r = SS 'a' @('status', $proj)
+Check '.secrets/new_token is managed (new)' ($r.Out -match 'new_token\s+new') $r.Out
+$r = SS 'a' @('push', $proj); Check 'pushed' ($r.Out -match 'pushed') $r.Out
+$r = SS 'b' @('pull', $proj); Check 'B receives it' (Same '.secrets\new_token') $r.Out
 
 # ---------------------------------------------------------------- recovery cases
 Write-Host "== recovery"
@@ -133,7 +179,7 @@ Remove-Item (Join-Path $bRoot "$proj\.secrets\pfx_password")
 $r = SS 'b' @('status', $proj); Check 'missing-locally detected' ((Count-Status $r 'missing-locally') -eq 1) $r.Out
 $r = SS 'b' @('pull', $proj); Check 'pull restores missing file' (Same '.secrets\pfx_password') $r.Out
 Remove-Item (Join-Path $work 'state-b\demo-project.json')
-$r = SS 'b' @('status', $proj); Check 'lost state: identical files show in-sync*' ((Count-Status $r 'in-sync*') -eq 6) $r.Out
+$r = SS 'b' @('status', $proj); Check 'lost state: identical files show in-sync*' ((Count-Status $r 'in-sync*') -eq 7) $r.Out
 $r = SS 'b' @('pull', $proj); Check 'pull re-links without rewriting' ($r.Out -match 'linked' -and $r.Out -notmatch 'pulled') $r.Out
 
 # ---------------------------------------------------------------- leak check

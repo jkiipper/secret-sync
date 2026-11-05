@@ -16,12 +16,24 @@ It is designed to be driven by an AI coding agent (a Claude Code skill), but wor
 ```
 <store>/                              (e.g. a Google Drive folder, available offline)
   recipients.txt                      age public key(s)
-  ignore.txt                          <project>\<path> wildcards never synced
   <project>/
+    secret-sync.json                  manifest: which files of this project are synced
     .env.age                          encrypted copy of <project>/.env
     .env.age.meta.json                which machine pushed it, and when
     .secrets/api_key.age
 ```
+
+**Projects opt in.** A project is synced only once it has a manifest, created by the first
+`include`. The manifest lists patterns relative to the project root:
+
+```json
+{ "include": [".env", ".secrets/*"], "exclude": [".secrets/old_cert_2019.pfx"] }
+```
+
+Sensitive-looking files that neither list covers are reported as `candidate`, so whoever works
+on the project (you, or an AI agent) decides: `include` or `exclude`. Nothing is ever synced
+just because its name looks secret. Patterns use `/`, are case-insensitive, and `*` also matches
+across folders; `.secrets/*` therefore covers files added there later.
 
 Each machine keeps a small local state file (outside the store) with hashes of what it last
 synced. That is how `status` tells *changed here* from *changed on the other machine* and
@@ -30,19 +42,29 @@ detects **conflicts** (changed on both).
 ## Commands
 
 ```
-secret-sync init   -machine NAME -projects-root DIR -store-root DIR -identity FILE
-secret-sync status [PROJECT | PROJECT/PATH ...] [-discover]
-secret-sync push   PROJECT | PROJECT/PATH ...    [-dry-run] [-force]
-secret-sync pull   [PROJECT | PROJECT/PATH ...]  [-dry-run] [-force]
-secret-sync ignore PROJECT/PATH-WILDCARD ...
+secret-sync init    -machine NAME -projects-root DIR -store-root DIR -identity FILE
+secret-sync status  [PROJECT | PROJECT/PATH ...] [-discover] [-show-tracked]
+secret-sync include PROJECT/PATTERN ...
+secret-sync exclude PROJECT/PATTERN ...
+secret-sync push    PROJECT | PROJECT/PATH ...    [-dry-run] [-force]
+secret-sync pull    [PROJECT | PROJECT/PATH ...]  [-dry-run] [-force]
 ```
+
+`status` covers the projects in the store; `-discover` adds every project folder under the
+projects root, to find ones without a manifest yet.
 
 | Status | Meaning | Next step |
 |---|---|---|
+| `candidate` | Looks sensitive, not in the manifest | `include` or `exclude` |
 | `new`, `local-changed`, `missing-in-store` | This machine has something the store lacks | `push` |
 | `remote-new`, `remote-changed`, `missing-locally` | The store has something this machine lacks | `pull` |
 | `in-sync` / `in-sync*` | Identical (`*`: not linked yet, any push/pull links it) | — |
 | `conflict` | Changed on both sides | Decide, then `push -force` or `pull -force` |
+
+Built-in rules that are facts, not decisions: candidates already **tracked by git** are hidden
+(git syncs them; `-show-tracked` lists them), public CA bundles such as `cacert.pem` are never
+candidates, and dependency, build and IDE folders (`node_modules`, `.git`, `.claude`...) are
+skipped.
 
 Exit codes: `0` ok, `1` error, `2` conflicts or refused/skipped files.
 

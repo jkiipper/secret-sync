@@ -22,12 +22,19 @@ type stateRec struct {
 
 type entry struct {
 	Project, Rel, Category, Local, Store string
-	LocalExists, StoreExists, Ignored    bool
+	Managed                              bool // in the manifest (or already in the store)
+	LocalExists, StoreExists             bool
 	State                                *stateRec
 	Git                                  string
 }
 
 type row struct{ project, path, status, git, result string }
+
+// projectReport collects per-project facts printed after the table.
+type projectReport struct {
+	hiddenTracked int
+	noManifest    bool
+}
 
 // Google Drive names conflicting copies like ".env (1).age".
 var reConflictCopy = regexp.MustCompile(` \(\d+\)(\.[^\\/]*)?$`)
@@ -35,19 +42,21 @@ var reConflictCopy = regexp.MustCompile(` \(\d+\)(\.[^\\/]*)?$`)
 func (a *app) sync() int {
 	o := a.o
 	if o.command == "push" && len(o.targets) == 0 {
-		return fail(errors.New(`push needs a target: PROJECT or PROJECT/PATH (use "status -discover" to see candidates)`))
+		return fail(errors.New(`push needs a target: PROJECT or PROJECT/PATH`))
 	}
 	projects, err := a.projectNames()
 	if err != nil {
 		return fail(err)
 	}
 	var rows []row
+	reports := map[string]projectReport{}
 	problems := 0
 	for _, p := range projects {
-		entries, err := a.entries(p)
+		entries, rep, err := a.entries(p)
 		if err != nil {
 			return fail(err)
 		}
+		reports[p] = rep
 		for _, e := range entries {
 			st, err := a.status(e)
 			result := ""
@@ -63,7 +72,7 @@ func (a *app) sync() int {
 			rows = append(rows, row{p, e.Rel, st, gitNote(e.Git), result})
 		}
 	}
-	a.print(rows)
+	a.print(rows, projects, reports)
 	if problems > 0 {
 		return 2
 	}
@@ -80,23 +89,30 @@ func gitNote(g string) string {
 	return ""
 }
 
-func (a *app) print(rows []row) {
+func (a *app) print(rows []row, projects []string, reports map[string]projectReport) {
 	if len(rows) == 0 {
 		fmt.Println("Nothing found.")
-		return
+	} else {
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "Project\tPath\tStatus\tGit\tResult")
+		fmt.Fprintln(tw, "-------\t----\t------\t---\t------")
+		for _, r := range rows {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.project, r.path, r.status, r.git, r.result)
+		}
+		tw.Flush()
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "Project\tPath\tStatus\tGit\tResult")
-	fmt.Fprintln(tw, "-------\t----\t------\t---\t------")
+	hidden := 0
+	var noManifest []string
+	for _, p := range projects {
+		hidden += reports[p].hiddenTracked
+		if reports[p].noManifest && slices.ContainsFunc(rows, func(r row) bool { return r.project == p }) {
+			noManifest = append(noManifest, p)
+		}
+	}
 	counts := map[string]int{}
 	for _, r := range rows {
 		counts[r.status]++
-		if a.o.command == "status" && r.status == "ignored" {
-			continue
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.project, r.path, r.status, r.git, r.result)
 	}
-	tw.Flush()
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
@@ -107,6 +123,12 @@ func (a *app) print(rows []row) {
 		parts[i] = fmt.Sprintf("%s=%d", k, counts[k])
 	}
 	fmt.Printf("\n[%s] %s\n", a.cfg.Machine, strings.Join(parts, "  "))
+	if hidden > 0 {
+		fmt.Printf("%d candidate file(s) already tracked by git are hidden (git syncs them; -show-tracked lists them).\n", hidden)
+	}
+	if len(noManifest) > 0 {
+		fmt.Printf("No manifest yet (not synced): %s. Decide with: secret-sync include|exclude PROJECT/PATTERN\n", strings.Join(noManifest, ", "))
+	}
 }
 
 // ---- selection -------------------------------------------------------------
@@ -128,6 +150,8 @@ func (a *app) excluded(name string) bool {
 	return false
 }
 
+// projectNames: explicit targets; otherwise every project in the store, plus with
+// -discover every project folder under projectsRoot.
 func (a *app) projectNames() ([]string, error) {
 	set := map[string]bool{}
 	if len(a.o.targets) > 0 {
@@ -167,31 +191,58 @@ func (a *app) fileFilter(project string) []string {
 	var f []string
 	for _, t := range a.o.targets {
 		if p, path := splitTarget(t); p == project && path != "" {
-			f = append(f, path)
+			f = append(f, normPattern(path))
 		}
 	}
 	return f
 }
 
-// entries builds one entry per relative path known locally (candidates) or in the store.
-func (a *app) entries(project string) ([]*entry, error) {
+// entries builds one entry per relative path that is managed (included in the
+// manifest, or already in the store) or is an unmanaged candidate.
+func (a *app) entries(project string) ([]*entry, projectReport, error) {
+	var rep projectReport
 	projDir := filepath.Join(a.cfg.ProjectsRoot, project)
 	storeDir := filepath.Join(a.cfg.StoreRoot, project)
 	state, err := a.loadState(project)
 	if err != nil {
-		return nil, err
+		return nil, rep, err
 	}
-	cats := map[string]string{}
+	m, hasManifest, err := a.loadManifest(project)
+	if err != nil {
+		return nil, rep, err
+	}
+	rep.noManifest = !hasManifest
+
+	type info struct {
+		cat     string
+		managed bool
+	}
+	files := map[string]*info{}
 	if isDir(projDir) {
-		for _, c := range findCandidates(projDir) {
-			cat := category(filepath.Base(c.rel), c.inSecret)
-			if cat == "example" {
+		for _, f := range walkFiles(projDir) {
+			slash := filepath.ToSlash(f.rel)
+			name := filepath.Base(f.rel)
+			if matchAny(m.Exclude, slash) {
 				continue
 			}
-			if cat == "" {
-				cat = "secrets-folder-other"
+			if matchAny(m.Include, slash) {
+				cat := category(name, f.inSecret)
+				if cat == "" {
+					cat = "included"
+				}
+				files[f.rel] = &info{cat: cat, managed: true}
+				continue
 			}
-			cats[c.rel] = cat
+			if isCandidate(name, f.inSecret) {
+				cat := category(name, f.inSecret)
+				if cat == "example" {
+					continue
+				}
+				if cat == "" {
+					cat = "secrets-folder-other"
+				}
+				files[f.rel] = &info{cat: cat}
+			}
 		}
 	}
 	if isDir(storeDir) {
@@ -205,38 +256,36 @@ func (a *app) entries(project string) ([]*entry, error) {
 			}
 			rel = strings.TrimSuffix(rel, ".age")
 			if reConflictCopy.MatchString(rel) {
-				fmt.Printf("  ! %s.age is a Google Drive conflict copy. Resolve by hand, then delete it.\n", filepath.Join(project, rel))
+				fmt.Printf("  ! %s.age is a sync-service conflict copy. Resolve by hand, then delete it.\n", filepath.Join(project, rel))
 				return nil
 			}
-			if _, ok := cats[rel]; !ok {
-				cats[rel] = "stored"
+			if matchAny(m.Exclude, filepath.ToSlash(rel)) {
+				return nil
+			}
+			if f, ok := files[rel]; ok {
+				f.managed = true
+			} else {
+				files[rel] = &info{cat: "stored", managed: true}
 			}
 			return nil
 		})
 	}
+
 	filter := a.fileFilter(project)
 	var out []*entry
-	for rel, cat := range cats {
+	for rel, f := range files {
 		if len(filter) > 0 && !slices.Contains(filter, filepath.ToSlash(rel)) {
 			continue
 		}
-		e := &entry{Project: project, Rel: rel, Category: cat,
+		e := &entry{Project: project, Rel: rel, Category: f.cat, Managed: f.managed,
 			Local: filepath.Join(projDir, rel), Store: filepath.Join(storeDir, rel) + ".age"}
 		e.LocalExists, e.StoreExists = isFile(e.Local), isFile(e.Store)
 		if s, ok := state[filepath.ToSlash(rel)]; ok {
 			s := s
 			e.State = &s
 		}
-		key := ignoreKey(project, rel)
-		for _, pat := range a.ignores {
-			if wildcardMatch(pat, key) {
-				e.Ignored = true
-				break
-			}
-		}
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Rel < out[j].Rel })
 	var locals []string
 	for _, e := range out {
 		if e.LocalExists {
@@ -251,14 +300,27 @@ func (a *app) entries(project string) ([]*entry, error) {
 			}
 		}
 	}
-	return out, nil
+	// Candidates already committed to git are git's business: hide them unless asked.
+	if !a.o.showTracked {
+		kept := out[:0]
+		for _, e := range out {
+			if !e.Managed && e.Git == "TRACKED" {
+				rep.hiddenTracked++
+				continue
+			}
+			kept = append(kept, e)
+		}
+		out = kept
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Rel < out[j].Rel })
+	return out, rep, nil
 }
 
 // ---- status ----------------------------------------------------------------
 
 func (a *app) status(e *entry) (string, error) {
-	if e.Ignored && !e.StoreExists {
-		return "ignored", nil
+	if !e.Managed {
+		return "candidate", nil
 	}
 	s := e.State
 	switch {
@@ -317,9 +379,14 @@ func (a *app) sameOrConflict(e *entry) (string, error) {
 
 func (a *app) act(e *entry, st string) string {
 	force := a.o.force
+	explicit := slices.Contains(a.fileFilter(e.Project), filepath.ToSlash(e.Rel))
 	switch a.o.command {
 	case "push":
 		switch {
+		case st == "candidate":
+			if explicit {
+				return fmt.Sprintf("SKIPPED: not in the manifest; run: secret-sync include %s/%s", e.Project, filepath.ToSlash(e.Rel))
+			}
 		case st == "new" || st == "local-changed" || st == "missing-in-store" || (st == "conflict" && force):
 			return a.push(e)
 		case st == "in-sync*":
